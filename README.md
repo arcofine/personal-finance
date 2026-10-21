@@ -3,6 +3,8 @@
 Local-first household finance app for a two-person shared ledger (CAD).  
 **v1 packaging:** browser UI + local Node API + SQLite — no Tauri, no bank APIs.
 
+**Agents:** read [`AGENTS.md`](./AGENTS.md) and [`docs/`](./docs/) before changing code.
+
 ## Monorepo layout
 
 | Path | Package | Role |
