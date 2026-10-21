@@ -11,6 +11,7 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+*.tsbuildinfo
 apps/web/dist/
 apps/server/dist/
 packages/core/dist/
