@@ -13,8 +13,25 @@ Local-first household finance app for a two-person shared ledger (CAD).
 
 ## Prerequisites
 
-- **Node.js 20+** (npm workspaces)
+**Requires Node 20 or 22 (LTS). Node 26+ is not supported yet because of `better-sqlite3`.**
+
+- **Recommended:** Node.js **22 LTS** (see `.nvmrc`)
+- Supported range: Node `>=20 <25` (npm workspaces)
 - Native build tools for `better-sqlite3` (usually fine on macOS/Linux; on Windows use the usual VS Build Tools)
+
+### Switch Node version
+
+```bash
+# nvm
+nvm install 22
+nvm use 22
+
+# fnm
+fnm install 22
+fnm use 22
+```
+
+Confirm with `node -v` (should show `v22.x` or `v20.x`).
 
 ## Install
 

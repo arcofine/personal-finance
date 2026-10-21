@@ -18,6 +18,6 @@
     "start": "npm run start -w @pf/server"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20 <25"
   }
 }
