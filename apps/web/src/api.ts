@@ -1,15 +1,28 @@
 import type {
   AccountType,
   AccountWithBalance,
+  BudgetMonth,
   Category,
   CategorySpendRow,
+  CreateSavingsPlanInput,
+  OverviewReport,
+  SavingsMonthRow,
+  SavingsPlan,
+  UpdateSavingsPlanInput,
   CreateAccountInput,
+  CreateFixedExpenseInput,
+  CreateSalaryInput,
   CreateTransactionInput,
   CreateTransferInput,
   CsvBankPreset,
+  FixedExpense,
+  FixedExpenseMonthPatch,
+  Salary,
   ImportResult,
   Transaction,
   UpdateAccountInput,
+  UpdateFixedExpenseInput,
+  UpdateSalaryInput,
   UpdateTransactionInput,
 } from "@pf/core";
 
@@ -104,6 +117,8 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  overview: () => request<OverviewReport>("/api/overview"),
+
   categorySpend: (month: string) =>
     request<{
       yearMonth: string;
@@ -111,6 +126,59 @@ export const api = {
       to: string;
       rows: CategorySpendRow[];
     }>(`/api/reports/category-spend?month=${encodeURIComponent(month)}`),
+
+  budgetMonth: (month: string) =>
+    request<BudgetMonth>(`/api/budget?month=${encodeURIComponent(month)}`),
+  savingsMonth: (month: string) =>
+    request<{
+      yearMonth: string;
+      rows: SavingsMonthRow[];
+      totals: { planned: number; saved: number; remaining: number };
+    }>(`/api/budget/savings?month=${encodeURIComponent(month)}`),
+  createSavingsPlan: (input: CreateSavingsPlanInput) =>
+    request<SavingsPlan>("/api/budget/savings", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateSavingsPlan: (id: string, input: UpdateSavingsPlanInput) =>
+    request<SavingsPlan>(`/api/budget/savings/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteSavingsPlan: (id: string) =>
+    request<void>(`/api/budget/savings/${id}`, { method: "DELETE" }),
+  createFixedExpense: (input: CreateFixedExpenseInput) =>
+    request<FixedExpense>("/api/budget/fixed-expenses", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateFixedExpense: (id: string, input: UpdateFixedExpenseInput) =>
+    request<FixedExpense>(`/api/budget/fixed-expenses/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteFixedExpense: (id: string, yearMonth: string, scope: "month" | "future" | "all") =>
+    request<void>(
+      `/api/budget/fixed-expenses/${id}?month=${encodeURIComponent(yearMonth)}&scope=${scope}`,
+      { method: "DELETE" },
+    ),
+  createSalary: (input: CreateSalaryInput) =>
+    request<Salary>("/api/budget/salaries", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateSalary: (id: string, input: UpdateSalaryInput) =>
+    request<Salary>(`/api/budget/salaries/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteSalary: (id: string) =>
+    request<void>(`/api/budget/salaries/${id}`, { method: "DELETE" }),
+  setFixedExpenseMonth: (id: string, yearMonth: string, patch: FixedExpenseMonthPatch) =>
+    request<void>(`/api/budget/fixed-expenses/${id}/months/${yearMonth}`, {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
 };
 
 export const ACCOUNT_TYPES: { value: AccountType; label: string }[] = [

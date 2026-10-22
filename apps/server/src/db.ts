@@ -69,7 +69,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_import_hash
   ON transactions(account_id, import_hash)
   WHERE import_hash IS NOT NULL AND deleted_at IS NULL;
 
--- Reserved for near-term envelopes / weekly cashflow (not used in M0 UI).
+-- Reserved for variable category envelopes (not used by fixed expenses).
 CREATE TABLE IF NOT EXISTS budget_periods (
   id TEXT PRIMARY KEY,
   household_id TEXT NOT NULL REFERENCES household(id),
@@ -88,6 +88,87 @@ CREATE TABLE IF NOT EXISTS budget_lines (
   updated_at TEXT NOT NULL,
   UNIQUE (budget_period_id, category_id)
 );
+
+-- Recurring bills. Leftover balance is computed month to month, not stored.
+CREATE TABLE IF NOT EXISTS fixed_expenses (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL REFERENCES household(id),
+  name TEXT NOT NULL,
+  monthly_amount REAL NOT NULL,
+  frequency TEXT NOT NULL DEFAULT 'monthly',
+  weekday TEXT,
+  anchor_date TEXT,
+  category_id TEXT REFERENCES categories(id),
+  account_id TEXT REFERENCES accounts(id),
+  due_day INTEGER,
+  starts_on TEXT NOT NULL,
+  ends_on TEXT,
+  carry_in REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_fixed_expenses_household
+  ON fixed_expenses(household_id);
+
+CREATE TABLE IF NOT EXISTS fixed_expense_months (
+  id TEXT PRIMARY KEY,
+  fixed_expense_id TEXT NOT NULL REFERENCES fixed_expenses(id),
+  year_month TEXT NOT NULL,
+  planned_amount REAL,
+  paid_amount REAL,
+  omitted INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (fixed_expense_id, year_month)
+);
+
+CREATE TABLE IF NOT EXISTS salaries (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL REFERENCES household(id),
+  name TEXT NOT NULL,
+  weekly_amount REAL NOT NULL,
+  payday TEXT NOT NULL,
+  anchor_date TEXT,
+  starts_on TEXT NOT NULL,
+  category_id TEXT REFERENCES categories(id),
+  account_id TEXT REFERENCES accounts(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_salaries_household ON salaries(household_id);
+
+CREATE TABLE IF NOT EXISTS salary_rates (
+  id TEXT PRIMARY KEY,
+  salary_id TEXT NOT NULL REFERENCES salaries(id),
+  effective_on TEXT NOT NULL,
+  amount REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (salary_id, effective_on)
+);
+
+CREATE TABLE IF NOT EXISTS savings_plans (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL REFERENCES household(id),
+  name TEXT NOT NULL,
+  amount REAL NOT NULL,
+  frequency TEXT NOT NULL CHECK (frequency IN ('weekly', 'monthly')),
+  weekday TEXT,
+  from_account_id TEXT NOT NULL REFERENCES accounts(id),
+  to_account_id TEXT NOT NULL REFERENCES accounts(id),
+  starts_on TEXT NOT NULL,
+  carry_in REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_savings_plans_household
+  ON savings_plans(household_id);
 `;
 
 export function openDatabase(dbPath: string): Db {
@@ -96,8 +177,109 @@ export function openDatabase(dbPath: string): Db {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  ensureBudgetColumns(db);
   ensureHousehold(db);
+  normalizeExpenseAmounts(db);
   return db;
+}
+
+/** Monthly bills created before a due date existed take the day of their latest payment. */
+function backfillMonthlyDueDays(db: Db): void {
+  const expenses = db
+    .prepare(
+      `
+      SELECT id, category_id, account_id
+      FROM fixed_expenses
+      WHERE deleted_at IS NULL AND frequency = 'monthly' AND due_day IS NULL AND category_id IS NOT NULL
+    `,
+    )
+    .all() as { id: string; category_id: string; account_id: string | null }[];
+  const latest = db.prepare(
+    `
+    SELECT date FROM transactions
+    WHERE deleted_at IS NULL
+      AND transfer_group_id IS NULL
+      AND amount < 0
+      AND category_id = ?
+      AND (? IS NULL OR account_id = ?)
+    ORDER BY date DESC
+    LIMIT 1
+  `,
+  );
+  const update = db.prepare(`UPDATE fixed_expenses SET due_day = ? WHERE id = ?`);
+  for (const expense of expenses) {
+    const payment = latest.get(expense.category_id, expense.account_id, expense.account_id) as
+      | { date: string }
+      | undefined;
+    const day = Number(payment?.date.slice(8, 10));
+    if (day >= 1 && day <= 31) update.run(day, expense.id);
+  }
+}
+
+/** Expense categories always leave the account, including rows saved before that rule. */
+function normalizeExpenseAmounts(db: Db): void {
+  db.prepare(
+    `
+    UPDATE transactions
+    SET amount = -ABS(amount), updated_at = ?
+    WHERE deleted_at IS NULL
+      AND amount > 0
+      AND category_id IN (
+        SELECT id FROM categories WHERE kind = 'expense' AND deleted_at IS NULL
+      )
+  `,
+  ).run(nowIso());
+}
+
+/** Existing databases were created before frequency and weekday columns existed. */
+function ensureBudgetColumns(db: Db): void {
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_info(fixed_expenses)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (!columns.has("frequency")) {
+    db.exec(
+      `ALTER TABLE fixed_expenses ADD COLUMN frequency TEXT NOT NULL DEFAULT 'monthly'`,
+    );
+  }
+  if (!columns.has("weekday")) {
+    db.exec(`ALTER TABLE fixed_expenses ADD COLUMN weekday TEXT`);
+  }
+  if (!columns.has("anchor_date")) {
+    db.exec(`ALTER TABLE fixed_expenses ADD COLUMN anchor_date TEXT`);
+  }
+  if (!columns.has("account_id")) {
+    db.exec(`ALTER TABLE fixed_expenses ADD COLUMN account_id TEXT REFERENCES accounts(id)`);
+  }
+  if (!columns.has("ends_on")) {
+    db.exec(`ALTER TABLE fixed_expenses ADD COLUMN ends_on TEXT`);
+  }
+  if (!columns.has("due_day")) {
+    db.exec(`ALTER TABLE fixed_expenses ADD COLUMN due_day INTEGER`);
+  }
+  backfillMonthlyDueDays(db);
+
+  const monthColumns = new Set(
+    (db.prepare(`PRAGMA table_info(fixed_expense_months)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (monthColumns.size > 0 && !monthColumns.has("omitted")) {
+    db.exec(`ALTER TABLE fixed_expense_months ADD COLUMN omitted INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  const salaryColumns = new Set(
+    (db.prepare(`PRAGMA table_info(salaries)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (salaryColumns.size > 0 && !salaryColumns.has("anchor_date")) {
+    db.exec(`ALTER TABLE salaries ADD COLUMN anchor_date TEXT`);
+  }
+  if (salaryColumns.size > 0 && !salaryColumns.has("account_id")) {
+    db.exec(`ALTER TABLE salaries ADD COLUMN account_id TEXT REFERENCES accounts(id)`);
+  }
 }
 
 function ensureHousehold(db: Db): string {

@@ -36,8 +36,8 @@ export function CategorySpendPage() {
         <div>
           <h1>Category spend</h1>
           <p>
-            Monthly totals by category (transfers excluded). Envelopes and weekly
-            forecast UI come next.
+            Monthly totals by category (transfers excluded). Fixed expenses on the
+            Budget page use these categories when you link one.
           </p>
         </div>
         <label>

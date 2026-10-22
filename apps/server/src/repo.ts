@@ -1,5 +1,6 @@
 import {
   categorySpend,
+  amountForBalance,
   computeBalance,
   importHash,
   mapCsvRows,
@@ -13,11 +14,13 @@ import {
   type CreateTransactionInput,
   type CreateTransferInput,
   type CsvBankPreset,
+  type CategoryKind,
   type CsvColumnMap,
   type ImportResult,
   type UpdateAccountInput,
   type UpdateTransactionInput,
 } from "@pf/core";
+import { exportFixedExpenses } from "./budgetRepo.js";
 import type { Db } from "./db.js";
 import { getHouseholdId } from "./db.js";
 import {
@@ -167,6 +170,15 @@ export function listTransactions(
   return rows.map(mapTransaction);
 }
 
+function categoryKindOf(db: Db, categoryId: string | null): CategoryKind | null {
+  if (!categoryId) return null;
+  const row = db
+    .prepare(`SELECT kind FROM categories WHERE id = ? AND deleted_at IS NULL`)
+    .get(categoryId) as { kind: CategoryKind } | undefined;
+  if (!row) throw new Error("Category not found");
+  return row.kind;
+}
+
 export function createTransaction(db: Db, input: CreateTransactionInput) {
   const account = getAccount(db, input.accountId);
   if (!account) throw new Error("Account not found");
@@ -186,7 +198,7 @@ export function createTransaction(db: Db, input: CreateTransactionInput) {
     householdId,
     input.accountId,
     input.date,
-    round2(input.amount),
+    amountForBalance(input.amount, categoryKindOf(db, input.categoryId ?? null)),
     input.payee ?? null,
     input.memo ?? null,
     input.categoryId ?? null,
@@ -211,6 +223,10 @@ export function updateTransaction(
     throw new Error("Edit transfer legs via delete + recreate transfer for M0");
   }
 
+  const categoryId =
+    input.categoryId !== undefined ? input.categoryId : existing.category_id;
+  const amount =
+    input.amount !== undefined ? input.amount : existing.amount;
   const stamp = nowIso();
   db.prepare(
     `
@@ -222,10 +238,10 @@ export function updateTransaction(
   ).run(
     input.accountId ?? existing.account_id,
     input.date ?? existing.date,
-    input.amount !== undefined ? round2(input.amount) : existing.amount,
+    amountForBalance(amount, categoryKindOf(db, categoryId)),
     input.payee !== undefined ? input.payee : existing.payee,
     input.memo !== undefined ? input.memo : existing.memo,
-    input.categoryId !== undefined ? input.categoryId : existing.category_id,
+    categoryId,
     stamp,
     id,
   );
@@ -413,14 +429,18 @@ export function exportJson(db: Db) {
     .map((r) => mapAccount(r as AccountRow));
   const categories = listCategories(db);
   const transactions = listTransactions(db);
+  const budget = exportFixedExpenses(db);
   return {
     exportedAt: nowIso(),
-    version: 1,
+    version: 2,
     currencyDefault: "CAD",
     household,
     accounts,
     categories,
     transactions,
+    fixedExpenses: budget.fixedExpenses,
+    fixedExpenseMonths: budget.fixedExpenseMonths,
+    salaries: budget.salaries,
   };
 }
 

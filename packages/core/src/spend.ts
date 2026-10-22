@@ -1,4 +1,4 @@
-import type { Category, CategorySpendRow, Transaction } from "./types.js";
+import type { Category, CategoryKind, CategorySpendRow, Transaction } from "./types.js";
 
 export interface SpendFilter {
   /** Inclusive YYYY-MM-DD */
@@ -76,6 +76,16 @@ export function monthBounds(yearMonth: string): { from: string; to: string } {
 
 export function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * An expense category always leaves the account. Entering 42.50 or -42.50
+ * both reduce the balance by 42.50. Other categories keep the sign entered.
+ */
+export function amountForBalance(amount: number, kind: CategoryKind | null): number {
+  const rounded = round2(amount);
+  if (kind === "expense") return round2(-Math.abs(rounded));
+  return rounded;
 }
 
 export function computeBalance(

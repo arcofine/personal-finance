@@ -4,7 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CSV_PRESET_STATUS } from "@pf/core";
+import * as budgetRepo from "./budgetRepo.js";
 import { openDatabase } from "./db.js";
+import * as savingsRepo from "./savingsRepo.js";
+import { householdOverview } from "./overview.js";
 import * as repo from "./repo.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,7 +34,7 @@ app.get("/api/meta", (_req, res) => {
     currency: "CAD",
     csvPresets: CSV_PRESET_STATUS,
     next: [
-      "Monthly category envelopes",
+      "Variable category envelopes",
       "Weekly cashflow (income credited weekly)",
       "Weekly expense forecast",
     ],
@@ -150,6 +153,159 @@ app.post("/api/import/csv", (req, res) => {
     }
     const result = repo.importCsv(db, { accountId, csvText, preset, columnMap });
     res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// —— Budget: fixed expenses ——
+app.get("/api/budget", (req, res) => {
+  try {
+    const now = new Date();
+    const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const yearMonth =
+      typeof req.query.month === "string" && req.query.month ? req.query.month : fallback;
+    res.json(budgetRepo.budgetMonth(db, yearMonth));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.get("/api/budget/savings", (req, res) => {
+  try {
+    const now = new Date();
+    const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const yearMonth =
+      typeof req.query.month === "string" && req.query.month ? req.query.month : fallback;
+    res.json(savingsRepo.savingsMonth(db, yearMonth));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post("/api/budget/savings", (req, res) => {
+  try {
+    const { name, amount, frequency, fromAccountId, toAccountId, startsOn } = req.body ?? {};
+    if (!name || amount === undefined || !frequency || !fromAccountId || !toAccountId || !startsOn) {
+      return res.status(400).json({
+        error: "name, amount, frequency, fromAccountId, toAccountId, and startsOn are required",
+      });
+    }
+    res.status(201).json(savingsRepo.createSavingsPlan(db, req.body));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.patch("/api/budget/savings/:id", (req, res) => {
+  try {
+    const plan = savingsRepo.updateSavingsPlan(db, req.params.id, req.body ?? {});
+    if (!plan) return res.status(404).json({ error: "Not found" });
+    res.json(plan);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.delete("/api/budget/savings/:id", (req, res) => {
+  const ok = savingsRepo.softDeleteSavingsPlan(db, req.params.id);
+  if (!ok) return res.status(404).json({ error: "Not found" });
+  res.status(204).end();
+});
+
+app.post("/api/budget/salaries", (req, res) => {
+  try {
+    const { name, amount, anchorDate, startsOn } = req.body ?? {};
+    if (!name || amount === undefined || !anchorDate || !startsOn) {
+      return res.status(400).json({
+        error: "name, amount, anchorDate, and startsOn are required",
+      });
+    }
+    res.status(201).json(budgetRepo.createSalary(db, req.body));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.patch("/api/budget/salaries/:id", (req, res) => {
+  try {
+    const salary = budgetRepo.updateSalary(db, req.params.id, req.body ?? {});
+    if (!salary) return res.status(404).json({ error: "Not found" });
+    res.json(salary);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.delete("/api/budget/salaries/:id", (req, res) => {
+  const ok = budgetRepo.softDeleteSalary(db, req.params.id);
+  if (!ok) return res.status(404).json({ error: "Not found" });
+  res.status(204).end();
+});
+
+app.post("/api/budget/fixed-expenses", (req, res) => {
+  try {
+    const { name, monthlyAmount, startsOn } = req.body ?? {};
+    if (!name || monthlyAmount === undefined || !startsOn) {
+      return res.status(400).json({
+        error: "name, monthlyAmount, and startsOn are required",
+      });
+    }
+    const expense = budgetRepo.createFixedExpense(db, req.body);
+    res.status(201).json(expense);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.patch("/api/budget/fixed-expenses/:id", (req, res) => {
+  try {
+    const expense = budgetRepo.updateFixedExpense(db, req.params.id, req.body ?? {});
+    if (!expense) return res.status(404).json({ error: "Not found" });
+    res.json(expense);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.delete("/api/budget/fixed-expenses/:id", (req, res) => {
+  try {
+    const scope = req.query.scope === "month" || req.query.scope === "future" ? req.query.scope : "all";
+    const month = typeof req.query.month === "string" ? req.query.month : "";
+    if (scope !== "all" && !month) {
+      return res.status(400).json({ error: "month is required" });
+    }
+    const ok = budgetRepo.removeFixedExpense(db, req.params.id, scope, month);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.status(204).end();
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.put("/api/budget/fixed-expenses/:id/months/:yearMonth", (req, res) => {
+  try {
+    const ok = budgetRepo.setFixedExpenseMonth(
+      db,
+      req.params.id,
+      req.params.yearMonth,
+      req.body ?? {},
+    );
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.status(204).end();
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// —— Overview ——
+app.get("/api/overview", (req, res) => {
+  try {
+    const now = new Date();
+    const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const yearMonth =
+      typeof req.query.month === "string" && req.query.month ? req.query.month : fallback;
+    res.json(householdOverview(db, yearMonth));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
