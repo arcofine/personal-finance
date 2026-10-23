@@ -9,8 +9,10 @@ import {
   monthBounds,
   newId,
   nowIso,
+  placeCategory,
   round2,
   type CreateAccountInput,
+  type CreateCategoryInput,
   type CreateTransactionInput,
   type CreateTransferInput,
   type CsvBankPreset,
@@ -18,6 +20,7 @@ import {
   type CsvColumnMap,
   type ImportResult,
   type UpdateAccountInput,
+  type UpdateCategoryInput,
   type UpdateTransactionInput,
 } from "@pf/core";
 import { exportFixedExpenses } from "./budgetRepo.js";
@@ -137,6 +140,71 @@ export function listCategories(db: Db) {
     )
     .all() as CategoryRow[];
   return rows.map(mapCategory);
+}
+
+export function createCategory(db: Db, input: CreateCategoryInput) {
+  const householdId = getHouseholdId(db);
+  const placed = placeCategory(input, listCategories(db));
+  const id = newId();
+  const stamp = nowIso();
+  db.prepare(
+    `
+    INSERT INTO categories
+      (id, household_id, name, kind, parent_id, system, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, NULL)
+  `,
+  ).run(id, householdId, placed.name, placed.kind, placed.parentId, stamp, stamp);
+  return listCategories(db).find((category) => category.id === id)!;
+}
+
+export function updateCategory(db: Db, id: string, input: UpdateCategoryInput) {
+  const existing = listCategories(db);
+  const current = existing.find((category) => category.id === id);
+  if (!current) return null;
+  const placed = placeCategory(
+    {
+      name: input.name !== undefined ? input.name : current.name,
+      kind: current.kind,
+      parentId: input.parentId !== undefined ? input.parentId : current.parentId,
+    },
+    existing,
+    id,
+  );
+  const stamp = nowIso();
+  db.prepare(
+    `UPDATE categories SET name = ?, parent_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+  ).run(placed.name, placed.parentId, stamp, id);
+  return listCategories(db).find((category) => category.id === id) ?? null;
+}
+
+export function softDeleteCategory(db: Db, id: string): boolean {
+  const existing = listCategories(db);
+  const current = existing.find((category) => category.id === id);
+  if (!current) return false;
+  if (existing.some((category) => category.parentId === id)) {
+    throw new Error("Move or delete the categories under this group first");
+  }
+  const used = db
+    .prepare(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM transactions WHERE category_id = ? AND deleted_at IS NULL)
+        + (SELECT COUNT(*) FROM fixed_expenses WHERE category_id = ? AND deleted_at IS NULL)
+        + (SELECT COUNT(*) FROM salaries WHERE category_id = ? AND deleted_at IS NULL)
+        AS total
+    `,
+    )
+    .get(id, id, id) as { total: number };
+  if (used.total > 0) {
+    throw new Error("This category is used on a transaction or a budget record. Rename it instead");
+  }
+  const stamp = nowIso();
+  const result = db
+    .prepare(
+      `UPDATE categories SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .run(stamp, stamp, id);
+  return result.changes > 0;
 }
 
 export function listTransactions(

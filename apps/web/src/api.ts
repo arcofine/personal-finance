@@ -6,10 +6,12 @@ import type {
   CategorySpendRow,
   CreateSavingsPlanInput,
   OverviewReport,
+  YearBudget,
   SavingsMonthRow,
   SavingsPlan,
   UpdateSavingsPlanInput,
   CreateAccountInput,
+  CreateCategoryInput,
   CreateFixedExpenseInput,
   CreateSalaryInput,
   CreateTransactionInput,
@@ -21,6 +23,7 @@ import type {
   ImportResult,
   Transaction,
   UpdateAccountInput,
+  UpdateCategoryInput,
   UpdateFixedExpenseInput,
   UpdateSalaryInput,
   UpdateTransactionInput,
@@ -73,6 +76,18 @@ export const api = {
     request<void>(`/api/accounts/${id}`, { method: "DELETE" }),
 
   listCategories: () => request<Category[]>("/api/categories"),
+  createCategory: (input: CreateCategoryInput) =>
+    request<Category>("/api/categories", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateCategory: (id: string, input: UpdateCategoryInput) =>
+    request<Category>(`/api/categories/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteCategory: (id: string) =>
+    request<void>(`/api/categories/${id}`, { method: "DELETE" }),
 
   listTransactions: (params: {
     accountId?: string;
@@ -118,6 +133,7 @@ export const api = {
     }),
 
   overview: () => request<OverviewReport>("/api/overview"),
+  yearBudget: (year: number) => request<YearBudget>(`/api/year?year=${year}`),
 
   categorySpend: (month: string) =>
     request<{
@@ -145,8 +161,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
-  deleteSavingsPlan: (id: string) =>
-    request<void>(`/api/budget/savings/${id}`, { method: "DELETE" }),
+  deleteSavingsPlan: (id: string, yearMonth: string, scope: "month" | "future" | "all") =>
+    request<void>(
+      `/api/budget/savings/${id}?month=${encodeURIComponent(yearMonth)}&scope=${scope}`,
+      { method: "DELETE" },
+    ),
   createFixedExpense: (input: CreateFixedExpenseInput) =>
     request<FixedExpense>("/api/budget/fixed-expenses", {
       method: "POST",

@@ -6,6 +6,9 @@ import {
   DEFAULT_CURRENCY,
   newId,
   nowIso,
+  occurrencesFor,
+  round2,
+  type Weekday,
 } from "@pf/core";
 
 export type Db = Database.Database;
@@ -161,6 +164,7 @@ CREATE TABLE IF NOT EXISTS savings_plans (
   from_account_id TEXT NOT NULL REFERENCES accounts(id),
   to_account_id TEXT NOT NULL REFERENCES accounts(id),
   starts_on TEXT NOT NULL,
+  ends_on TEXT,
   carry_in REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -169,6 +173,27 @@ CREATE TABLE IF NOT EXISTS savings_plans (
 
 CREATE INDEX IF NOT EXISTS idx_savings_plans_household
   ON savings_plans(household_id);
+
+CREATE TABLE IF NOT EXISTS savings_plan_months (
+  id TEXT PRIMARY KEY,
+  savings_plan_id TEXT NOT NULL REFERENCES savings_plans(id),
+  year_month TEXT NOT NULL,
+  planned_amount REAL NOT NULL,
+  omitted INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (savings_plan_id, year_month)
+);
+
+CREATE TABLE IF NOT EXISTS savings_plan_intervals (
+  id TEXT PRIMARY KEY,
+  savings_plan_id TEXT NOT NULL REFERENCES savings_plans(id),
+  from_date TEXT NOT NULL,
+  to_date TEXT NOT NULL,
+  amount REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 export function openDatabase(dbPath: string): Db {
@@ -180,7 +205,47 @@ export function openDatabase(dbPath: string): Db {
   ensureBudgetColumns(db);
   ensureHousehold(db);
   normalizeExpenseAmounts(db);
+  migrateSavingsAmountsToFrequency(db);
   return db;
+}
+
+/**
+ * Month amounts used to be the full month. They are now the amount for each
+ * usual day, matching the objective's frequency. Existing totals are split
+ * once so the month's planned total stays the same.
+ */
+function migrateSavingsAmountsToFrequency(db: Db): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+  const done = db
+    .prepare(`SELECT value FROM app_meta WHERE key = ?`)
+    .get("savings_amount_frequency") as { value: string } | undefined;
+  if (done) return;
+  const rows = db
+    .prepare(
+      `
+      SELECT m.id, m.year_month, m.planned_amount, p.frequency, p.weekday
+      FROM savings_plan_months m
+      JOIN savings_plans p ON p.id = m.savings_plan_id
+    `,
+    )
+    .all() as {
+    id: string;
+    year_month: string;
+    planned_amount: number;
+    frequency: "weekly" | "monthly";
+    weekday: Weekday | null;
+  }[];
+  const update = db.prepare(`UPDATE savings_plan_months SET planned_amount = ? WHERE id = ?`);
+  for (const row of rows) {
+    const count = occurrencesFor(row.year_month, row.frequency, row.weekday, null).count;
+    update.run(count > 0 ? round2(row.planned_amount / count) : row.planned_amount, row.id);
+  }
+  db.prepare(`INSERT INTO app_meta (key, value) VALUES (?, ?)`).run("savings_amount_frequency", "1");
 }
 
 /** Monthly bills created before a due date existed take the day of their latest payment. */
@@ -267,6 +332,23 @@ function ensureBudgetColumns(db: Db): void {
   );
   if (monthColumns.size > 0 && !monthColumns.has("omitted")) {
     db.exec(`ALTER TABLE fixed_expense_months ADD COLUMN omitted INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  const savingsColumns = new Set(
+    (db.prepare(`PRAGMA table_info(savings_plans)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (savingsColumns.size > 0 && !savingsColumns.has("ends_on")) {
+    db.exec(`ALTER TABLE savings_plans ADD COLUMN ends_on TEXT`);
+  }
+  const savingsMonthColumns = new Set(
+    (db.prepare(`PRAGMA table_info(savings_plan_months)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (savingsMonthColumns.size > 0 && !savingsMonthColumns.has("omitted")) {
+    db.exec(`ALTER TABLE savings_plan_months ADD COLUMN omitted INTEGER NOT NULL DEFAULT 0`);
   }
 
   const salaryColumns = new Set(

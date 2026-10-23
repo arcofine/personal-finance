@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  attributeExpenseActivity,
   buildBudgetMonth,
   shiftYearMonth,
   type ExpenseActivity,
@@ -32,46 +33,55 @@ describe("shiftYearMonth", () => {
 });
 
 describe("buildBudgetMonth", () => {
-  it("carries unspent plan into the next month", () => {
+  it("shows under-spend in the month and carries nothing forward", () => {
     const january = buildBudgetMonth("2026-01", [rent()], [], []);
     assert.equal(january.rows[0]?.left, 1800);
 
-    const february = buildBudgetMonth("2026-02", [rent()], [], []);
-    assert.equal(february.rows[0]?.broughtForward, 1800);
+    const activity: ExpenseActivity[] = [
+      { fixedExpenseId: "rent", yearMonth: "2026-02", total: -1700 },
+    ];
+    const february = buildBudgetMonth("2026-02", [rent()], [], activity);
+    assert.equal(february.rows[0]?.broughtForward, 0);
     assert.equal(february.rows[0]?.planned, 1800);
-    assert.equal(february.rows[0]?.left, 3600);
+    assert.equal(february.rows[0]?.spent, 1700);
+    assert.equal(february.rows[0]?.left, 100);
+
+    const march = buildBudgetMonth("2026-03", [rent()], [], activity);
+    assert.equal(march.rows[0]?.broughtForward, 0);
+    assert.equal(march.rows[0]?.left, 1800);
   });
 
-  it("uses category spending and rolls the leftover forward", () => {
+  it("uses category spending when the payment matches the plan", () => {
     const activity: ExpenseActivity[] = [
       { fixedExpenseId: "rent", yearMonth: "2026-01", total: -1800 },
-      { fixedExpenseId: "rent", yearMonth: "2026-02", total: -1700 },
     ];
     const january = buildBudgetMonth("2026-01", [rent()], [], activity);
     assert.equal(january.rows[0]?.spent, 1800);
     assert.equal(january.rows[0]?.spentSource, "category");
     assert.equal(january.rows[0]?.left, 0);
-
-    const february = buildBudgetMonth("2026-02", [rent()], [], activity);
-    assert.equal(february.rows[0]?.broughtForward, 0);
-    assert.equal(february.rows[0]?.spent, 1700);
-    assert.equal(february.rows[0]?.left, 100);
-
-    const march = buildBudgetMonth("2026-03", [rent()], [], activity);
-    assert.equal(march.rows[0]?.broughtForward, 100);
-    assert.equal(march.rows[0]?.left, 1900);
   });
 
-  it("carries an overspend as a negative balance", () => {
+  it("keeps an overspend in the month it happened", () => {
     const activity: ExpenseActivity[] = [
       { fixedExpenseId: "rent", yearMonth: "2026-01", total: -1900 },
     ];
     const january = buildBudgetMonth("2026-01", [rent()], [], activity);
+    assert.equal(january.rows[0]?.spent, 1900);
     assert.equal(january.rows[0]?.left, -100);
 
     const february = buildBudgetMonth("2026-02", [rent()], [], activity);
-    assert.equal(february.rows[0]?.broughtForward, -100);
-    assert.equal(february.rows[0]?.left, 1700);
+    assert.equal(february.rows[0]?.broughtForward, 0);
+    assert.equal(february.rows[0]?.planned, 1800);
+    assert.equal(february.rows[0]?.left, 1800);
+
+    const paidOnPlan: ExpenseActivity[] = [
+      ...activity,
+      { fixedExpenseId: "rent", yearMonth: "2026-02", total: -1800 },
+    ];
+    const settled = buildBudgetMonth("2026-02", [rent()], [], paidOnPlan);
+    assert.equal(settled.rows[0]?.broughtForward, 0);
+    assert.equal(settled.rows[0]?.spent, 1800);
+    assert.equal(settled.rows[0]?.left, 0);
   });
 
   it("lets a hand-entered payment replace category spending", () => {
@@ -98,11 +108,15 @@ describe("buildBudgetMonth", () => {
     const february = buildBudgetMonth("2026-02", [rent({ monthlyAmount: 100 })], adjustments, []);
     assert.equal(february.rows[0]?.planned, 50);
     assert.equal(february.rows[0]?.plannedOverridden, true);
-    assert.equal(february.rows[0]?.left, january.rows[0]!.left + 50 - 50);
+    assert.deepEqual(february.rows[0]?.plannedMonths, [{ yearMonth: "2026-02", amount: 50 }]);
+    assert.deepEqual(january.rows[0]?.plannedMonths, [{ yearMonth: "2026-02", amount: 50 }]);
+    assert.equal(january.rows[0]?.left, 100);
+    assert.equal(february.rows[0]?.left, 0);
 
     const march = buildBudgetMonth("2026-03", [rent({ monthlyAmount: 100 })], adjustments, []);
     assert.equal(march.rows[0]?.planned, 100);
-    assert.equal(march.rows[0]?.broughtForward, february.rows[0]?.left);
+    assert.equal(march.rows[0]?.broughtForward, 0);
+    assert.equal(march.rows[0]?.left, 100);
   });
 
   it("starts with carry-in and hides months before the expense begins", () => {
@@ -113,7 +127,10 @@ describe("buildBudgetMonth", () => {
     const march = buildBudgetMonth("2026-03", [expense], [], []);
     assert.equal(march.rows[0]?.broughtForward, 40);
     assert.equal(march.rows[0]?.spentSource, "none");
-    assert.equal(march.rows[0]?.left, 140);
+    assert.equal(march.rows[0]?.left, 100);
+
+    const april = buildBudgetMonth("2026-04", [expense], [], []);
+    assert.equal(april.rows[0]?.broughtForward, 0);
   });
 
   it("treats a category refund as money returned to the envelope", () => {
@@ -140,9 +157,9 @@ describe("buildBudgetMonth", () => {
 
     const november = buildBudgetMonth("2026-11", [weekly], [], []);
     assert.equal(november.rows[0]?.occurrences, 4);
-    assert.equal(november.rows[0]?.broughtForward, 500);
+    assert.equal(november.rows[0]?.broughtForward, 0);
     assert.equal(november.rows[0]?.planned, 400);
-    assert.equal(november.rows[0]?.left, 900);
+    assert.equal(november.rows[0]?.left, 400);
 
     const biweekly = rent({
       id: "hydro",
@@ -199,14 +216,65 @@ describe("buildBudgetMonth", () => {
     assert.equal(february.rows.length, 0);
 
     const march = buildBudgetMonth("2026-03", [expense], [], []);
-    assert.equal(march.rows[0]?.broughtForward, 1800);
+    assert.equal(march.rows[0]?.broughtForward, 0);
     assert.equal(march.rows[0]?.planned, 1800);
-    assert.equal(march.rows[0]?.left, 3600);
+    assert.equal(march.rows[0]?.left, 1800);
   });
 
   it("hides months after the series ends", () => {
     const expense = rent({ endsOn: "2026-01" });
     assert.equal(buildBudgetMonth("2026-01", [expense], [], []).rows.length, 1);
     assert.equal(buildBudgetMonth("2026-02", [expense], [], []).rows.length, 0);
+  });
+});
+
+describe("attributeExpenseActivity", () => {
+  const categories = [
+    { id: "housing", parentId: null },
+    { id: "rent", parentId: "housing" },
+    { id: "lifestyle", parentId: null },
+  ];
+
+  it("keeps one category's spending on the only bill that uses it", () => {
+    const activity = attributeExpenseActivity(
+      [
+        { id: "rent-bill", name: "Rent Rivero", categoryId: "rent", accountId: "rbc" },
+        { id: "loan", name: "Pret Etudiant", categoryId: "lifestyle", accountId: "rbc" },
+      ],
+      categories,
+      [
+        { categoryId: "rent", accountId: "rbc", yearMonth: "2026-10", payee: "Rivero", total: -2120 },
+        { categoryId: "lifestyle", accountId: "rbc", yearMonth: "2026-10", payee: "Pret Etudiant", total: -186 },
+      ],
+    );
+    assert.deepEqual(
+      activity.map((row) => [row.fixedExpenseId, row.total]),
+      [
+        ["rent-bill", -2120],
+        ["loan", -186],
+      ],
+    );
+  });
+
+  it("splits a shared category by the payment name and keeps the specific subcategory", () => {
+    const activity = attributeExpenseActivity(
+      [
+        { id: "loan", name: "Pret Etudiant", categoryId: "lifestyle", accountId: "rbc" },
+        { id: "other", name: "Other lifestyle", categoryId: "lifestyle", accountId: "rbc" },
+        { id: "housing-bill", name: "Housing", categoryId: "housing", accountId: null },
+        { id: "rent-bill", name: "Rent Rivero", categoryId: "rent", accountId: "rbc" },
+      ],
+      categories,
+      [
+        { categoryId: "lifestyle", accountId: "rbc", yearMonth: "2026-10", payee: "Pret Etudiant", total: -186 },
+        { categoryId: "lifestyle", accountId: "rbc", yearMonth: "2026-10", payee: "Metro", total: -40 },
+        { categoryId: "rent", accountId: "rbc", yearMonth: "2026-10", payee: "Rivero", total: -2120 },
+      ],
+    );
+    const byId = new Map(activity.map((row) => [row.fixedExpenseId, row.total]));
+    assert.equal(byId.get("loan"), -186);
+    assert.equal(byId.get("other"), undefined);
+    assert.equal(byId.get("rent-bill"), -2120);
+    assert.equal(byId.get("housing-bill"), undefined);
   });
 });

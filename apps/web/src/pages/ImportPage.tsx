@@ -57,16 +57,10 @@ export function ImportPage() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>CSV import</h1>
-          <p>
-            Generic importer with duplicate detection (date + amount + payee +
-            account). RBC / TD presets are stubs until verified against real
-            downloads.
-          </p>
-        </div>
-      </div>
+      <p className="settings-intro">
+        Generic importer with duplicate detection (date + amount + payee + account). RBC / TD presets are stubs until
+        verified against real downloads.
+      </p>
 
       {error && <p className="error">{error}</p>}
 

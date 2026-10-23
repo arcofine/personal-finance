@@ -8,6 +8,7 @@ import * as budgetRepo from "./budgetRepo.js";
 import { openDatabase } from "./db.js";
 import * as savingsRepo from "./savingsRepo.js";
 import { householdOverview } from "./overview.js";
+import { householdYear } from "./yearBudget.js";
 import * as repo from "./repo.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -89,6 +90,35 @@ app.delete("/api/accounts/:id", (req, res) => {
 // —— Categories ——
 app.get("/api/categories", (_req, res) => {
   res.json(repo.listCategories(db));
+});
+
+app.post("/api/categories", (req, res) => {
+  try {
+    const category = repo.createCategory(db, req.body ?? {});
+    res.status(201).json(category);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.patch("/api/categories/:id", (req, res) => {
+  try {
+    const category = repo.updateCategory(db, req.params.id, req.body ?? {});
+    if (!category) return res.status(404).json({ error: "Not found" });
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.delete("/api/categories/:id", (req, res) => {
+  try {
+    const ok = repo.softDeleteCategory(db, req.params.id);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.status(204).end();
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 // —— Transactions ——
@@ -208,9 +238,18 @@ app.patch("/api/budget/savings/:id", (req, res) => {
 });
 
 app.delete("/api/budget/savings/:id", (req, res) => {
-  const ok = savingsRepo.softDeleteSavingsPlan(db, req.params.id);
-  if (!ok) return res.status(404).json({ error: "Not found" });
-  res.status(204).end();
+  try {
+    const scope = req.query.scope === "month" || req.query.scope === "future" ? req.query.scope : "all";
+    const month = typeof req.query.month === "string" ? req.query.month : "";
+    if (scope !== "all" && !month) {
+      return res.status(400).json({ error: "month is required" });
+    }
+    const ok = savingsRepo.removeSavingsPlan(db, req.params.id, scope, month);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.status(204).end();
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 app.post("/api/budget/salaries", (req, res) => {
@@ -293,6 +332,18 @@ app.put("/api/budget/fixed-expenses/:id/months/:yearMonth", (req, res) => {
     );
     if (!ok) return res.status(404).json({ error: "Not found" });
     res.status(204).end();
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// —— Year ——
+app.get("/api/year", (req, res) => {
+  try {
+    const now = new Date();
+    const requested = typeof req.query.year === "string" ? Number(req.query.year) : now.getFullYear();
+    const asOfDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    res.json(householdYear(db, requested, asOfDate));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

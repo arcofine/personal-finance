@@ -47,6 +47,17 @@ export interface Category {
   deletedAt: string | null;
 }
 
+export interface CreateCategoryInput {
+  name: string;
+  kind: CategoryKind;
+  parentId?: string | null;
+}
+
+export interface UpdateCategoryInput {
+  name?: string;
+  parentId?: string | null;
+}
+
 /**
  * Money movement on one account.
  * Sign convention: positive increases account balance; negative decreases it.

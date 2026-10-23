@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { OverviewPoint, OverviewReport, WeekForecast } from "@pf/core";
 import { api, formatCad } from "../api";
 import { BarChart, ChartFrame, ChartLegend, LineChart } from "../charts";
+import { localToday, WeekFunds } from "./WeekFunds";
 
 const INCOME = "var(--accent)";
 const EXPENSE = "var(--negative)";
@@ -23,10 +24,12 @@ export function OverviewPage() {
     })();
   }, []);
 
+  const today = localToday();
   const current = overview?.months.find((month) => month.yearMonth === overview.asOf) ?? null;
   const recorded = overview?.months.filter((month) => month.yearMonth <= overview.asOf) ?? [];
   const forecast = overview?.months.filter((month) => month.yearMonth >= overview.asOf) ?? [];
   const aheadLeft = forecast.reduce((sum, month) => sum + month.predictedLeft, 0);
+  const upcomingWeeks = (overview?.weeks ?? []).filter((week) => week.to >= today).slice(0, 4);
 
   return (
     <>
@@ -35,7 +38,7 @@ export function OverviewPage() {
           <h1>Overview</h1>
           <p>
             Spending recorded so far, savings and placement balances, the next 7 days, and the
-            months ahead from paychecks and fixed bills.
+            months ahead from paychecks, fixed bills, and money set aside.
           </p>
         </div>
       </div>
@@ -45,6 +48,8 @@ export function OverviewPage() {
         <p className="muted">Loading…</p>
       ) : (
         <>
+          <WeekFunds weeks={upcomingWeeks} today={today} heading="h2" />
+
           <WeekAhead week={overview.week} />
 
           <p className="muted overview-stand">
@@ -74,7 +79,7 @@ export function OverviewPage() {
             <Stat
               label="Left after bills"
               value={formatCad(current.predictedLeft)}
-              note={`${formatCad(current.expectedIncome)} pay − ${formatCad(current.plannedExpenses)} fixed`}
+              note={`${formatCad(current.expectedIncome)} pay − ${formatCad(current.plannedExpenses)} fixed − ${formatCad(current.plannedSavings)} set aside`}
               tone={current.predictedLeft < 0 ? "neg" : "pos"}
             />
           </div>
@@ -161,13 +166,14 @@ export function OverviewPage() {
                 series={[
                   { name: "Expected pay", color: INCOME },
                   { name: "Fixed bills", color: BILLS },
+                  { name: "Set aside", color: PLACEMENT },
                 ]}
               />
             }
-            note={`About ${formatCad(aheadLeft)} left after fixed bills from ${monthName(overview.asOf)} through ${monthName(forecast[forecast.length - 1]?.yearMonth ?? overview.asOf)}. Raises already on a salary are included. Groceries and other variable spending are not guessed, and nothing is added to savings or placements.`}
+            note={`About ${formatCad(aheadLeft)} left after fixed bills and savings from ${monthName(overview.asOf)} through ${monthName(forecast[forecast.length - 1]?.yearMonth ?? overview.asOf)}. Raises already on a salary are included. Groceries and other variable spending are not guessed.`}
           >
             <BarChart
-              label={`Expected pay and fixed bills from ${monthName(overview.asOf)} through ${monthName(forecast[forecast.length - 1]?.yearMonth ?? overview.asOf)}`}
+              label={`Expected pay, fixed bills, and savings from ${monthName(overview.asOf)} through ${monthName(forecast[forecast.length - 1]?.yearMonth ?? overview.asOf)}`}
               labels={forecast.map((month) => shortMonth(month.yearMonth))}
               format={formatCad}
               series={[
@@ -181,6 +187,11 @@ export function OverviewPage() {
                   color: BILLS,
                   values: forecast.map((month) => month.plannedExpenses),
                 },
+                {
+                  name: "Set aside",
+                  color: PLACEMENT,
+                  values: forecast.map((month) => month.plannedSavings),
+                },
               ]}
             />
             <MonthTable
@@ -188,6 +199,7 @@ export function OverviewPage() {
               columns={[
                 { header: "Expected pay", value: (month) => month.expectedIncome, tone: "pos" },
                 { header: "Fixed bills", value: (month) => month.plannedExpenses, tone: "neg" },
+                { header: "Set aside", value: (month) => month.plannedSavings, tone: "neg" },
                 { header: "Left", value: (month) => month.predictedLeft, tone: "auto" },
               ]}
             />

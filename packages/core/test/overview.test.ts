@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { buildOverview, type OverviewInput } from "../dist/overview.js";
 import type { FixedExpenseTemplate } from "../dist/budget.js";
 import type { SalaryTemplate } from "../dist/schedule.js";
+import type { SavingsPlanTemplate } from "../dist/savings.js";
 
 function salary(): SalaryTemplate {
   return {
@@ -112,11 +113,13 @@ describe("buildOverview", () => {
     const october = overview.months.find((month) => month.yearMonth === "2026-10");
     assert.equal(october?.expectedIncome, 6650);
     assert.equal(october?.plannedExpenses, 2120);
+    assert.equal(october?.plannedSavings, 0);
     assert.equal(october?.predictedLeft, 4530);
 
     const january = overview.months.find((month) => month.yearMonth === "2027-01");
     assert.equal(january?.expectedIncome, 5900);
     assert.equal(january?.plannedExpenses, 2120);
+    assert.equal(january?.plannedSavings, 0);
     assert.equal(january?.predictedLeft, 3780);
     assert.equal(january?.expenses, null);
     assert.equal(january?.income, null);
@@ -141,5 +144,30 @@ describe("buildOverview", () => {
     const december = overview.months.find((month) => month.yearMonth === "2026-12");
     assert.equal(november?.plannedExpenses, 1800);
     assert.equal(december?.plannedExpenses, 2120);
+  });
+
+  it("subtracts savings and placement objectives from what is left", () => {
+    const plan: SavingsPlanTemplate = {
+      id: "celi",
+      name: "CELI",
+      amount: 100,
+      frequency: "weekly",
+      weekday: "friday",
+      fromAccountId: "td",
+      toAccountId: "celi",
+      startsOn: "2026-10",
+      carryIn: 0,
+      monthAmounts: [{ yearMonth: "2026-11", amount: 80 }],
+    };
+    const overview = buildOverview(input({ savingsPlans: [plan] }));
+    const october = overview.months.find((month) => month.yearMonth === "2026-10");
+    const november = overview.months.find((month) => month.yearMonth === "2026-11");
+    const december = overview.months.find((month) => month.yearMonth === "2026-12");
+    assert.equal(october?.plannedSavings, 500);
+    assert.equal(october?.predictedLeft, 4030);
+    assert.equal(november?.plannedSavings, 320);
+    assert.equal(november?.predictedLeft, (november?.expectedIncome ?? 0) - (november?.plannedExpenses ?? 0) - 320);
+    assert.equal(december?.plannedSavings, 400);
+    assert.equal(december?.savings, null);
   });
 });

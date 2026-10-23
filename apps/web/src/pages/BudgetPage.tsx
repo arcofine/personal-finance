@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import type {
   AccountWithBalance,
   BudgetMonth,
+  BudgetPerformance,
   BudgetMonthRow,
   Category,
   PayFrequency,
@@ -11,10 +12,23 @@ import type {
   Transaction,
   Weekday,
 } from "@pf/core";
-import { dateOnDay, monthBounds, shiftYearMonth, WEEKDAYS, weekdayName, weekdayOf } from "@pf/core";
+import {
+  buildBudgetPerformance,
+  buildMonthSummary,
+  buildWeekFunds,
+  dateOnDay,
+  monthBounds,
+  round2,
+  shiftYearMonth,
+  WEEKDAYS,
+  weekdayName,
+  weekdayOf,
+} from "@pf/core";
+import { MonthSummaryView } from "./MonthSummaryView";
+import { localToday } from "./WeekFunds";
 import { api, currentYearMonth, formatCad } from "../api";
 
-type Tab = "income" | "expenses" | "savings";
+type Tab = "summary" | "performance" | "income" | "expenses" | "savings";
 
 type SavingsDirection = "in" | "out";
 
@@ -27,6 +41,8 @@ interface SavingsMove {
   toName: string;
   direction: SavingsDirection | "between";
   potLabel: string;
+  /** True when both accounts have a paired transfer leg. */
+  paired: boolean;
 }
 
 interface ExpenseDraft {
@@ -39,6 +55,7 @@ interface ExpenseDraft {
   categoryId: string;
   accountId: string;
   carryIn: string;
+  months: { yearMonth: string; amount: string }[];
 }
 
 interface SalaryDraft {
@@ -71,6 +88,7 @@ const EMPTY_EXPENSE: ExpenseDraft = {
   categoryId: "",
   accountId: "",
   carryIn: "",
+  months: [],
 };
 
 const EMPTY_SALARY: SalaryDraft = {
@@ -96,7 +114,7 @@ export function BudgetPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
-  const [tab, setTab] = useState<Tab>("expenses");
+  const [tab, setTab] = useState<Tab>("summary");
   const [modal, setModal] = useState<ModalState | null>(null);
 
   useEffect(() => {
@@ -110,7 +128,7 @@ export function BudgetPage() {
             api.budgetMonth(month),
             api.listCategories(),
             api.listAccounts(),
-            api.listTransactions({ from: bounds.from, to: bounds.to }),
+            api.listTransactions({ to: bounds.to }),
             api.savingsMonth(month),
           ]);
         if (cancelled) return;
@@ -133,13 +151,113 @@ export function BudgetPage() {
   }, [month, reloadToken]);
 
   const visible = budget?.yearMonth === month ? budget : null;
-  const nextLabel = formatYearMonth(visible?.nextMonth ?? shiftYearMonth(month, 1));
+  const monthTransactions = useMemo(() => {
+    const bounds = monthBounds(month);
+    return transfers.filter((tx) => tx.date >= bounds.from && tx.date <= bounds.to);
+  }, [transfers, month]);
   const savingsMoves = useMemo(
-    () => (transferMonth === month ? savingsTransfers(transfers, accounts) : []),
-    [transferMonth, month, transfers, accounts],
+    () => (transferMonth === month ? savingsTransfers(monthTransactions, accounts) : []),
+    [transferMonth, month, monthTransactions, accounts],
   );
   const savingsPlans = savingsReport?.yearMonth === month ? savingsReport.rows : [];
+  const performance = useMemo(
+    () =>
+      visible
+        ? buildBudgetPerformance(visible, monthTransactions, categories, savingsPlans)
+        : null,
+    [visible, monthTransactions, categories, savingsPlans],
+  );
+  const summary = useMemo(() => {
+    if (!visible) return null;
+    return buildMonthSummary({
+      yearMonth: month,
+      accounts: accounts.map((account) => ({
+        id: account.id,
+        name: account.name,
+        type: account.type,
+        openingBalance: account.openingBalance,
+      })),
+      movements: transfers.map((tx) => ({
+        accountId: tx.accountId,
+        date: tx.date,
+        amount: tx.amount,
+        categoryId: tx.categoryId,
+        transfer: tx.transferGroupId != null,
+      })),
+      categories: categories.map((category) => ({
+        id: category.id,
+        name: category.name,
+        parentId: category.parentId,
+        kind: category.kind,
+      })),
+      plans: [
+        ...visible.income.map((row) => ({
+          categoryId: row.categoryId,
+          kind: "income" as const,
+          dates: row.dates.map((date, index) => ({
+            date,
+            amount: row.payAmounts[index] ?? 0,
+          })),
+          unscheduled: row.dates.length === 0 ? row.expected : 0,
+        })),
+        ...visible.rows.map((row) => ({
+          categoryId: row.categoryId,
+          kind: "expense" as const,
+          dates: splitPlanned(row.planned, row.dates),
+          unscheduled: row.dates.length === 0 ? row.planned : 0,
+        })),
+      ],
+    });
+  }, [visible, month, accounts, transfers, categories]);
+  const weekFunds = useMemo(() => {
+    if (!visible) return [];
+    return buildWeekFunds({
+      fromMonth: month,
+      toMonth: month,
+      accounts: accounts.map((account) => ({
+        id: account.id,
+        type: account.type,
+        openingBalance: account.openingBalance,
+      })),
+      movements: transfers.map((tx) => ({
+        accountId: tx.accountId,
+        date: tx.date,
+        amount: tx.amount,
+        categoryId: tx.categoryId,
+        payee: tx.payee,
+        transferGroupId: tx.transferGroupId,
+      })),
+      plans: [
+        ...visible.income.map((row) => ({
+          name: row.name,
+          kind: "income" as const,
+          accountId: row.accountId,
+          categoryId: row.categoryId,
+          dates: row.dates.map((date, index) => ({ date, amount: row.payAmounts[index] ?? 0 })),
+          recorded: row.received,
+        })),
+        ...visible.rows.map((row) => ({
+          name: row.name,
+          kind: "expense" as const,
+          accountId: row.accountId,
+          categoryId: row.categoryId,
+          dates: splitPlanned(row.planned, row.dates),
+          recorded: row.spent,
+        })),
+      ],
+      savings: savingsPlans.map((row) => ({
+        toAccountId: row.toAccountId,
+        amount: row.amount,
+        frequency: row.frequency,
+        weekday: row.weekday,
+        startsOn: row.startsOn,
+        monthAmounts: row.monthAmounts,
+        intervals: row.intervals ?? [],
+      })),
+    });
+  }, [visible, month, accounts, transfers, savingsPlans]);
   const pots = accounts.filter((account) => isPot(account.type));
+  const plannedSavings = round2(savingsPlans.reduce((sum, row) => sum + row.planned, 0));
   const setAside = savingsMoves
     .filter((move) => move.direction === "in")
     .reduce((sum, move) => sum + move.amount, 0);
@@ -201,16 +319,22 @@ export function BudgetPage() {
           <Stat label="Paid" amount={visible.totals.spent} />
           <Stat
             label="Income after plan"
-            amount={visible.incomeTotal - visible.totals.planned}
+            amount={round2(visible.incomeTotal - visible.totals.planned - plannedSavings)}
             signed
+            note="After expenses and money set aside"
           />
-          <Stat label={`Left for ${nextLabel}`} amount={visible.totals.left} signed />
         </div>
       )}
 
       <section className="panel">
         <div className="tab-bar">
           <div className="tabs" role="tablist" aria-label="Budget sections">
+            <TabButton active={tab === "summary"} onClick={() => setTab("summary")}>
+              Summary
+            </TabButton>
+            <TabButton active={tab === "performance"} onClick={() => setTab("performance")}>
+              Performance
+            </TabButton>
             <TabButton active={tab === "income"} onClick={() => setTab("income")}>
               Income
               <span className="tab-count">{visible?.income.length ?? 0}</span>
@@ -224,7 +348,7 @@ export function BudgetPage() {
               <span className="tab-count">{savingsPlans.length}</span>
             </TabButton>
           </div>
-          {tab === "savings" ? (
+          {tab === "performance" || tab === "summary" ? null : tab === "savings" ? (
             <div className="tab-actions">
               <button
                 type="button"
@@ -253,7 +377,16 @@ export function BudgetPage() {
 
         {loading && !visible ? (
           <p className="empty">Loading…</p>
-        ) : !visible ? null : tab === "income" ? (
+        ) : !visible ? null : tab === "summary" && summary ? (
+          <MonthSummaryView
+            summary={summary}
+            funds={weekFunds}
+            today={localToday()}
+            previousMonth={formatYearMonth(shiftYearMonth(month, -1))}
+          />
+        ) : tab === "performance" && performance ? (
+          <PerformanceView report={performance} />
+        ) : tab === "income" ? (
           <IncomeTable
             rows={visible.income}
             total={visible.incomeTotal}
@@ -289,8 +422,12 @@ export function BudgetPage() {
           {tab === "income"
             ? "Each salary repeats every 14 days from the payday you pick — 26 paychecks a year. Pick paydays a week apart when you alternate."
             : tab === "expenses"
-              ? `Left = brought forward + planned − paid, and it moves to ${nextLabel}. Link a category so spending counts as paid automatically.`
-              : "An objective repeats weekly or monthly. Transfers you record count toward it, and a withdrawal sets it back. What is still to save carries into the next month."}
+              ? "Left is planned minus paid for this month. A positive amount is under the plan, and a negative amount is over. Nothing moves to the next month. Link a category so spending counts as paid automatically."
+              : tab === "savings"
+                ? "An objective repeats weekly or monthly. Money you record in that account counts toward it, and money leaving it sets it back. What is still to save carries into the next month."
+                : tab === "performance"
+                  ? "Realized means activity recorded in the register. Expense performance covers the recurring items in this budget; categorized income and money recorded in savings or placement feed the other comparisons."
+                  : "The week cards use chequing and cash. A bill already paid is not counted again. Opening balances below are the previous month’s closing balances."}
         </p>
       </section>
 
@@ -300,7 +437,6 @@ export function BudgetPage() {
           month={month}
           categories={categories}
           accounts={accounts}
-          rows={visible?.rows ?? []}
           onClose={() => setModal(null)}
           onSaved={done}
         />
@@ -319,6 +455,7 @@ export function BudgetPage() {
         <PaidModal
           row={modal.row}
           month={month}
+          accounts={accounts}
           onClose={() => setModal(null)}
           onSaved={() => done()}
         />
@@ -352,8 +489,12 @@ export function BudgetPage() {
       )}
       {modal?.kind === "delete-savings" && (
         <ConfirmModal
-          title="Delete transfer"
-          message={`Delete the ${formatCad(modal.move.amount)} transfer from ${modal.move.fromName} to ${modal.move.toName}? Both accounts lose the paired entry.`}
+          title={modal.move.paired ? "Delete transfer" : "Delete transaction"}
+          message={
+            modal.move.paired
+              ? `Delete the ${formatCad(modal.move.amount)} transfer from ${modal.move.fromName} to ${modal.move.toName}? Both accounts lose the paired entry.`
+              : `Delete the ${formatCad(modal.move.amount)} entry on ${modal.move.direction === "out" ? modal.move.fromName : modal.move.toName}?`
+          }
           onClose={() => setModal(null)}
           onConfirm={async () => {
             await api.deleteTransaction(modal.move.id);
@@ -371,12 +512,12 @@ export function BudgetPage() {
         />
       )}
       {modal?.kind === "delete-savings-plan" && (
-        <ConfirmModal
-          title="Delete objective"
-          message={`Delete the ${modal.row.name} objective? Transfers already recorded stay in the accounts.`}
+        <RemoveObjectiveModal
+          name={modal.row.name}
+          month={month}
           onClose={() => setModal(null)}
-          onConfirm={async () => {
-            await api.deleteSavingsPlan(modal.row.id);
+          onRemoved={async (scope) => {
+            await api.deleteSavingsPlan(modal.row.id, month, scope);
             done();
           }}
         />
@@ -405,6 +546,154 @@ function TabButton({
       {children}
     </button>
   );
+}
+
+function PerformanceView({ report }: { report: BudgetPerformance }) {
+  return (
+    <div className="performance-report">
+      <div className="stat-row performance-stats">
+        <PerformanceStat
+          label="Income realized"
+          comparison={report.income}
+          favourableLabel="Above plan"
+          unfavourableLabel="Below plan"
+        />
+        <PerformanceStat
+          label="Expenses realized"
+          comparison={report.expenses}
+          favourableLabel="Under budget"
+          unfavourableLabel="Over budget"
+        />
+        <PerformanceStat
+          label="Savings realized"
+          comparison={report.savings}
+          favourableLabel="Ahead of target"
+          unfavourableLabel="Below target"
+        />
+      </div>
+
+      <PerformanceTable
+        title="Expense performance"
+        empty="No budgeted expenses this month."
+        rows={report.expenses.rows}
+        expense
+      />
+      <PerformanceTable
+        title="Savings performance"
+        empty="No savings objectives this month."
+        rows={report.savings.rows}
+      />
+    </div>
+  );
+}
+
+function PerformanceStat({
+  label,
+  comparison,
+  favourableLabel,
+  unfavourableLabel,
+}: {
+  label: string;
+  comparison: { budgeted: number; realized: number; variance: number; percent: number | null };
+  favourableLabel: string;
+  unfavourableLabel: string;
+}) {
+  const even = Math.abs(comparison.variance) < 0.005;
+  const favourable = comparison.variance > 0;
+  return (
+    <div className="stat">
+      <div className="label">{label}</div>
+      <div className="value">{formatCad(comparison.realized)}</div>
+      <div className="performance-stat-detail">
+        of {formatCad(comparison.budgeted)}
+        <span className={even ? "muted" : favourable ? "balance pos" : "balance neg"}>
+          {even
+            ? "On plan"
+            : `${favourable ? favourableLabel : unfavourableLabel} by ${formatCad(
+                Math.abs(comparison.variance),
+              )}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function PerformanceTable({
+  title,
+  empty,
+  rows,
+  expense = false,
+}: {
+  title: string;
+  empty: string;
+  rows: BudgetPerformance["expenses"]["rows"];
+  expense?: boolean;
+}) {
+  return (
+    <>
+      <h3 className="section-label">{title}</h3>
+      {rows.length === 0 ? (
+        <p className="empty performance-empty">{empty}</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data-table performance-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Comparison</th>
+                <th className="num">Budgeted</th>
+                <th className="num">Realized</th>
+                <th className="num">Variance</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <div className="row-title">{row.name}</div>
+                  </td>
+                  <td>
+                    <ComparisonBars budgeted={row.budgeted} realized={row.realized} />
+                  </td>
+                  <td className="num">{formatCad(row.budgeted)}</td>
+                  <td className="num">{formatCad(row.realized)}</td>
+                  <td className={`num ${moneyClass(row.variance)}`}>
+                    {formatSignedCad(row.variance)}
+                  </td>
+                  <td>
+                    <span className={`performance-status ${row.status}`}>
+                      {performanceLabel(row.status, expense)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ComparisonBars({ budgeted, realized }: { budgeted: number; realized: number }) {
+  const max = Math.max(Math.abs(budgeted), Math.abs(realized), 1);
+  return (
+    <div className="comparison-bars" aria-label={`Budgeted ${formatCad(budgeted)}, realized ${formatCad(realized)}`}>
+      <span className="comparison-bar budgeted" style={{ width: `${(Math.abs(budgeted) / max) * 100}%` }} />
+      <span className="comparison-bar realized" style={{ width: `${(Math.abs(realized) / max) * 100}%` }} />
+    </div>
+  );
+}
+
+function performanceLabel(
+  status: BudgetPerformance["expenses"]["rows"][number]["status"],
+  expense: boolean,
+): string {
+  if (status === "on-track") return "On plan";
+  if (status === "not-budgeted") return "No target";
+  if (expense) return status === "ahead" ? "Under budget" : "Over budget";
+  return status === "ahead" ? "Ahead" : "Below target";
 }
 
 function IncomeTable({
@@ -562,10 +851,14 @@ function ExpenseTable({
               </td>
               <td className="num">
                 {formatCad(row.planned)}
-                {row.frequency !== "monthly" && (
-                  <div className="row-sub">
-                    {formatCad(row.monthlyAmount)} × {row.occurrences}
-                  </div>
+                {row.plannedOverridden ? (
+                  <div className="row-sub">This month only</div>
+                ) : (
+                  row.frequency !== "monthly" && (
+                    <div className="row-sub">
+                      {formatCad(row.monthlyAmount)} × {row.occurrences}
+                    </div>
+                  )
                 )}
               </td>
               <td className="num">
@@ -664,12 +957,159 @@ function Modal({
   );
 }
 
+function MonthAmountList({
+  rows,
+  defaultMonth,
+  onChange,
+  amountLabel = "Planned total (CAD)",
+}: {
+  rows: { yearMonth: string; amount: string }[];
+  defaultMonth: string;
+  onChange: (rows: { yearMonth: string; amount: string }[]) => void;
+  amountLabel?: string;
+}) {
+  return (
+    <div className="span-2 salary-changes">
+      <div className="salary-changes-head">
+        <span>Only these months</span>
+        <button
+          type="button"
+          className="secondary tiny"
+          onClick={() => onChange([...rows, { yearMonth: defaultMonth, amount: "" }])}
+        >
+          Add a month
+        </button>
+      </div>
+      {rows.map((item, index) => (
+        <div className="salary-change" key={`${item.yearMonth}-${index}`}>
+          <label>
+            Month
+            <input
+              type="month"
+              value={item.yearMonth}
+              required
+              onChange={(event) =>
+                onChange(rows.map((row, rowIndex) =>
+                  rowIndex === index ? { ...row, yearMonth: event.target.value } : row,
+                ))
+              }
+            />
+          </label>
+          <label>
+            {amountLabel}
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={item.amount}
+              required
+              onChange={(event) =>
+                onChange(rows.map((row, rowIndex) =>
+                  rowIndex === index ? { ...row, amount: event.target.value } : row,
+                ))
+              }
+            />
+          </label>
+          <button
+            type="button"
+            className="danger tiny"
+            onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DateIntervalList({
+  month,
+  rows,
+  onChange,
+  amountLabel,
+}: {
+  month: string;
+  rows: { from: string; to: string; amount: string }[];
+  onChange: (rows: { from: string; to: string; amount: string }[]) => void;
+  amountLabel: string;
+}) {
+  const bounds = monthBounds(month);
+  return (
+    <div className="span-2 salary-changes">
+      <div className="salary-changes-head">
+        <span>These dates</span>
+        <button
+          type="button"
+          className="secondary tiny"
+          onClick={() => onChange([...rows, { from: bounds.from, to: bounds.to, amount: "" }])}
+        >
+          Add dates
+        </button>
+      </div>
+      {rows.map((item, index) => (
+        <div className="salary-change date-interval" key={`${item.from}-${item.to}-${index}`}>
+          <label>
+            From
+            <input
+              type="date"
+              value={item.from}
+              required
+              onChange={(event) =>
+                onChange(rows.map((row, rowIndex) =>
+                  rowIndex === index ? { ...row, from: event.target.value } : row,
+                ))
+              }
+            />
+          </label>
+          <label>
+            To
+            <input
+              type="date"
+              value={item.to}
+              required
+              onChange={(event) =>
+                onChange(rows.map((row, rowIndex) =>
+                  rowIndex === index ? { ...row, to: event.target.value } : row,
+                ))
+              }
+            />
+          </label>
+          <label>
+            {amountLabel}
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={item.amount}
+              required
+              onChange={(event) =>
+                onChange(rows.map((row, rowIndex) =>
+                  rowIndex === index ? { ...row, amount: event.target.value } : row,
+                ))
+              }
+            />
+          </label>
+          <button
+            type="button"
+            className="danger tiny"
+            onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ExpenseModal({
   row,
   month,
   categories,
   accounts,
-  rows,
   onClose,
   onSaved,
 }: {
@@ -677,7 +1117,6 @@ function ExpenseModal({
   month: string;
   categories: Category[];
   accounts: AccountWithBalance[];
-  rows: BudgetMonthRow[];
   onClose: () => void;
   onSaved: (startsOn?: string) => void;
 }) {
@@ -693,6 +1132,10 @@ function ExpenseModal({
           categoryId: row.categoryId ?? "",
           accountId: row.accountId ?? "",
           carryIn: row.carryIn ? String(row.carryIn) : "",
+          months: row.plannedMonths.map((item) => ({
+            yearMonth: item.yearMonth,
+            amount: String(item.amount),
+          })),
         }
       : { ...EMPTY_EXPENSE, dueDate: `${month}-01` },
   );
@@ -700,15 +1143,6 @@ function ExpenseModal({
   const [error, setError] = useState<string | null>(null);
 
   const options = useMemo(() => categoryOptionsFor(categories, "expense"), [categories]);
-  const usedIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const other of rows) {
-      if (other.id === row?.id || !other.categoryId) continue;
-      if (!sameAccountScope(draft.accountId || null, other.accountId)) continue;
-      ids.add(other.categoryId);
-    }
-    return ids;
-  }, [rows, row, draft.accountId]);
 
   function set<K extends keyof ExpenseDraft>(key: K, value: ExpenseDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -725,6 +1159,10 @@ function ExpenseModal({
       dueDay: draft.frequency === "monthly" ? Number(draft.dueDate.slice(8, 10)) : null,
     };
     const carryIn = draft.carryIn.trim() ? Number(draft.carryIn) : 0;
+    const monthAmounts = draft.months.map((item) => ({
+      yearMonth: item.yearMonth,
+      amount: Number(item.amount),
+    }));
     try {
       if (row) {
         await api.updateFixedExpense(row.id, {
@@ -734,6 +1172,7 @@ function ExpenseModal({
           categoryId: draft.categoryId || null,
           accountId: draft.accountId || null,
           carryIn,
+          monthAmounts,
         });
         onSaved();
       } else {
@@ -745,6 +1184,7 @@ function ExpenseModal({
           accountId: draft.accountId || null,
           startsOn: month,
           carryIn,
+          monthAmounts,
         });
         onSaved(created.startsOn);
       }
@@ -780,7 +1220,7 @@ function ExpenseModal({
           </select>
         </label>
         <label>
-          {occurrenceAmountLabel(draft.frequency)} (CAD)
+          Usual {occurrenceAmountLabel(draft.frequency).replace(/^Amount/, "amount")} (CAD)
           <input
             type="number"
             min="0"
@@ -834,16 +1274,16 @@ function ExpenseModal({
           <select value={draft.categoryId} onChange={(e) => set("categoryId", e.target.value)}>
             <option value="">No category — enter paid by hand</option>
             {options.map((option) => (
-              <option
-                key={option.id}
-                value={option.id}
-                disabled={categoryBlocked(option.id, usedIds, categories, row?.categoryId ?? null)}
-              >
+              <option key={option.id} value={option.id}>
                 {option.label}
               </option>
             ))}
           </select>
         </label>
+        <p className="muted span-2 modal-hint">
+          Several bills can use the same category. Spending counts on this bill when it is the only
+          one with that category, or when the payment name matches this bill.
+        </p>
         <AccountField
           label="Pay from"
           value={draft.accountId}
@@ -861,6 +1301,15 @@ function ExpenseModal({
             placeholder="0"
           />
         </label>
+        <MonthAmountList
+          rows={draft.months}
+          defaultMonth={month}
+          onChange={(months) => setDraft((current) => ({ ...current, months }))}
+        />
+        <p className="muted span-2 modal-hint">
+          The usual amount repeats. A month listed here replaces that month’s planned total and leaves every other
+          month on the usual amount.
+        </p>
         {!row && (
           <p className="muted span-2 modal-hint">
             {draft.frequency === "monthly"
@@ -1088,23 +1537,29 @@ function SalaryModal({
 function PaidModal({
   row,
   month,
+  accounts,
   onClose,
   onSaved,
 }: {
   row: BudgetMonthRow;
   month: string;
+  accounts: AccountWithBalance[];
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [amount, setAmount] = useState(row.spentSource === "manual" ? String(row.spent) : "");
+  const bounds = monthBounds(month);
+  const remaining = Math.max(0, Math.round((row.planned - row.spent) * 100) / 100);
+  const [amount, setAmount] = useState(remaining > 0 ? remaining.toFixed(2) : "");
+  const [date, setDate] = useState(paymentDate(month, row.dates));
+  const [accountId, setAccountId] = useState(row.accountId ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function save(paidAmount: number | null) {
+  async function clearManual() {
     setBusy(true);
     setError(null);
     try {
-      await api.setFixedExpenseMonth(row.id, month, { paidAmount });
+      await api.setFixedExpenseMonth(row.id, month, { paidAmount: null });
       onSaved();
     } catch (err) {
       setError((err as Error).message);
@@ -1112,23 +1567,50 @@ function PaidModal({
     }
   }
 
-  function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    const raw = amount.trim();
-    if (!raw) {
-      void save(null);
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    const paid = Number(amount);
+    if (!amount.trim() || !Number.isFinite(paid) || paid <= 0) {
+      setError("Enter the amount you paid");
       return;
     }
-    const next = Number(raw);
-    if (!Number.isFinite(next)) {
-      setError("Paid amount must be a number");
+    if (!accountId) {
+      setError("Pick the account that paid");
       return;
     }
-    void save(next);
+    if (date < bounds.from || date > bounds.to) {
+      setError("The payment date has to be in this month");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createTransaction({
+        accountId,
+        date,
+        amount: row.categoryId ? paid : -paid,
+        payee: row.name,
+        categoryId: row.categoryId,
+      });
+      if (row.categoryId) {
+        if (row.spentSource === "manual") {
+          await api.setFixedExpenseMonth(row.id, month, { paidAmount: null });
+        }
+      } else {
+        const already = row.spentSource === "manual" ? row.spent : 0;
+        await api.setFixedExpenseMonth(row.id, month, {
+          paidAmount: Math.round((already + paid) * 100) / 100,
+        });
+      }
+      onSaved();
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
   }
 
   return (
-    <Modal title={`Paid for ${row.name}`} onClose={onClose}>
+    <Modal title={`Pay ${row.name}`} onClose={onClose}>
       <form className="form-grid" onSubmit={onSubmit}>
         <div className="modal-summary">
           <div>
@@ -1136,42 +1618,60 @@ function PaidModal({
             <strong>{formatCad(row.planned)}</strong>
           </div>
           <div>
-            <span className="muted">Brought forward</span>
-            <strong className={moneyClass(row.broughtForward)}>
-              {formatCad(row.broughtForward)}
-            </strong>
+            <span className="muted">Already paid</span>
+            <strong>{formatCad(row.spent)}</strong>
           </div>
           <div>
-            <span className="muted">Paid now</span>
-            <strong>{formatCad(row.spent)}</strong>
+            <span className="muted">Still to pay</span>
+            <strong>{formatCad(remaining)}</strong>
           </div>
         </div>
         <label>
-          Paid in {formatYearMonth(month)} (CAD)
+          Amount (CAD)
           <input
             type="number"
+            min="0.01"
             step="0.01"
             inputMode="decimal"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder={String(row.planned)}
+            onChange={(event) => setAmount(event.target.value)}
+            placeholder={remaining > 0 ? remaining.toFixed(2) : "0.00"}
+            required
             autoFocus
           />
         </label>
+        <label>
+          Date
+          <input
+            type="date"
+            min={bounds.from}
+            max={bounds.to}
+            value={date}
+            onChange={(event) => setDate(event.target.value)}
+            required
+          />
+        </label>
+        <label>
+          Pay from
+          <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+            <option value="">Choose an account</option>
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <p className="muted modal-hint">
+          This adds the payment to the register and takes it out of the account balance.
           {row.categoryId
-            ? `Leave empty to use spending in ${row.categoryName ?? "the linked category"}.`
-            : "Leave empty to clear it."}
+            ? " Spending in this category counts as paid. If another bill uses the same category, only a payment with this bill's name counts here."
+            : " The same amount counts as paid on this bill."}
         </p>
         {error && <p className="error">{error}</p>}
         <div className="modal-actions">
           {row.spentSource === "manual" && row.categoryId && (
-            <button
-              type="button"
-              className="secondary"
-              disabled={busy}
-              onClick={() => void save(null)}
-            >
+            <button type="button" className="secondary" disabled={busy} onClick={() => void clearManual()}>
               Use category spending
             </button>
           )}
@@ -1180,12 +1680,23 @@ function PaidModal({
             Cancel
           </button>
           <button type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Save"}
+            {busy ? "Saving…" : "Record payment"}
           </button>
         </div>
       </form>
     </Modal>
   );
+}
+
+function paymentDate(month: string, dates: string[]): string {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const upcoming = dates.find((date) => date >= today);
+  if (upcoming && upcoming.slice(0, 7) === month) return upcoming;
+  const last = dates[dates.length - 1];
+  if (last && last.slice(0, 7) === month) return last;
+  if (today.slice(0, 7) === month) return today;
+  return `${month}-01`;
 }
 
 function SavingsPlans({
@@ -1236,7 +1747,9 @@ function SavingsPlans({
                       ? `Weekly${row.weekday ? ` · ${weekdayName(row.weekday)}s` : ""}`
                       : "Monthly"}
                     <div className="row-sub">
-                      {row.occurrences} × {formatCad(row.amount)}
+                      {row.customDates
+                        ? "Custom dates"
+                        : `${row.occurrences} × ${formatCad(eachAmount(row))}${row.plannedOverridden ? " · This month only" : ""}`}
                     </div>
                   </td>
                   <td className="num">{formatCad(row.planned)}</td>
@@ -1274,6 +1787,11 @@ function SavingsPlans({
   );
 }
 
+function eachAmount(row: SavingsMonthRow): number {
+  if (row.occurrences <= 0) return row.amount;
+  return round2(row.planned / row.occurrences);
+}
+
 function SavingsPlanModal({
   row,
   month,
@@ -1295,8 +1813,15 @@ function SavingsPlanModal({
   const [weekday, setWeekday] = useState<Weekday>(row?.weekday ?? "friday");
   const [fromAccountId, setFromAccountId] = useState(row?.fromAccountId ?? cash[0]?.id ?? "");
   const [toAccountId, setToAccountId] = useState(row?.toAccountId ?? pots[0]?.id ?? "");
+  const [months, setMonths] = useState(
+    row?.monthAmounts.map((item) => ({ yearMonth: item.yearMonth, amount: String(item.amount) })) ?? [],
+  );
+  const [intervals, setIntervals] = useState(
+    row?.intervals?.map((item) => ({ from: item.from, to: item.to, amount: String(item.amount) })) ?? [],
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const eachLabel = frequency === "weekly" ? "Amount each week (CAD)" : "Amount each month (CAD)";
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -1311,6 +1836,15 @@ function SavingsPlanModal({
       weekday: frequency === "weekly" ? weekday : null,
       fromAccountId,
       toAccountId,
+      monthAmounts: months.map((item) => ({
+        yearMonth: item.yearMonth,
+        amount: Number(item.amount),
+      })),
+      intervals: intervals.map((item) => ({
+        from: item.from,
+        to: item.to,
+        amount: Number(item.amount),
+      })),
     };
     try {
       if (row) await api.updateSavingsPlan(row.id, body);
@@ -1344,7 +1878,7 @@ function SavingsPlanModal({
           </select>
         </label>
         <label>
-          {frequency === "weekly" ? "Amount each week (CAD)" : "Amount each month (CAD)"}
+          {frequency === "weekly" ? "Usual amount each week (CAD)" : "Usual amount each month (CAD)"}
           <input
             type="number"
             min="0.01"
@@ -1391,10 +1925,23 @@ function SavingsPlanModal({
             ))}
           </select>
         </label>
+        <MonthAmountList
+          rows={months}
+          defaultMonth={month}
+          amountLabel={eachLabel}
+          onChange={setMonths}
+        />
+        <DateIntervalList
+          month={month}
+          rows={intervals}
+          amountLabel={eachLabel}
+          onChange={setIntervals}
+        />
         <p className="muted span-2 modal-hint">
-          {frequency === "weekly"
-            ? "The month’s objective is this amount times the number of that weekday. Recorded transfers from the first account into the second count toward it."
-            : "The objective is this amount once a month. Recorded transfers from the first account into the second count toward it."}
+          The usual amount repeats on each {frequency === "weekly" ? "week" : "month"}. A month or a date range uses
+          the amount you enter for each of those usual days, and every other day stays on the usual amount. A date
+          range wins on the days it covers. Any money recorded in this account counts, and money leaving it sets the
+          objective back.
         </p>
         {error && <p className="error span-2">{error}</p>}
         <ModalActions busy={busy} label={row ? "Save" : "Add objective"} onClose={onClose} />
@@ -1436,7 +1983,7 @@ function SavingsTable({
         Set aside {formatCad(setAside)} · Withdrawn {formatCad(withdrawn)}
       </p>
       {moves.length === 0 ? (
-        <p className="empty">No savings or placement transfers this month.</p>
+        <p className="empty">Nothing recorded in savings or placement this month.</p>
       ) : (
         <div className="table-wrap">
           <table className="data-table">
@@ -1467,7 +2014,7 @@ function SavingsTable({
                     <button
                       type="button"
                       className="danger tiny"
-                      aria-label={`Delete transfer from ${move.fromName} to ${move.toName}`}
+                      aria-label={`Delete ${move.paired ? "transfer" : "transaction"} from ${move.fromName} to ${move.toName}`}
                       onClick={() => onDelete(move)}
                     >
                       Delete
@@ -1643,6 +2190,26 @@ function savingsTransfers(transactions: Transaction[], accounts: AccountWithBala
       toName: toAccount.name,
       direction,
       potLabel: pot.type === "placement" ? "placement" : "savings",
+      paired: true,
+    });
+  }
+
+  for (const tx of transactions) {
+    if (tx.transferGroupId || tx.deletedAt || tx.amount === 0) continue;
+    const account = byId.get(tx.accountId);
+    if (!account || !isPot(account.type)) continue;
+    const inbound = tx.amount > 0;
+    const who = tx.payee?.trim() || "Register";
+    moves.push({
+      id: tx.id,
+      date: tx.date,
+      amount: Math.abs(tx.amount),
+      memo: tx.memo,
+      fromName: inbound ? who : account.name,
+      toName: inbound ? account.name : who,
+      direction: inbound ? "in" : "out",
+      potLabel: account.type === "placement" ? "placement" : "savings",
+      paired: false,
     });
   }
   moves.sort((a, b) => (a.date === b.date ? a.fromName.localeCompare(b.fromName) : a.date < b.date ? -1 : 1));
@@ -1670,6 +2237,54 @@ function defaultTransferDate(month: string): string {
     return `${current}-${String(now.getDate()).padStart(2, "0")}`;
   }
   return `${month}-01`;
+}
+
+function RemoveObjectiveModal({
+  name,
+  month,
+  onClose,
+  onRemoved,
+}: {
+  name: string;
+  month: string;
+  onClose: () => void;
+  onRemoved: (scope: "month" | "future" | "all") => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<"month" | "future" | "all" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const label = formatYearMonth(month);
+
+  async function remove(scope: "month" | "future" | "all") {
+    setBusy(scope);
+    setError(null);
+    try {
+      await onRemoved(scope);
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Modal title={`Remove ${name}`} onClose={onClose}>
+      <p>Transfers already recorded stay in the accounts. Choose which months to remove.</p>
+      {error && <p className="error">{error}</p>}
+      <div className="choice-list">
+        <button type="button" className="secondary" disabled={busy !== null} onClick={() => remove("month")}>
+          {busy === "month" ? "Removing…" : `Only ${label}`}
+        </button>
+        <button type="button" className="secondary" disabled={busy !== null} onClick={() => remove("future")}>
+          {busy === "future" ? "Removing…" : `${label} and every month after`}
+        </button>
+        <button type="button" className="danger solid" disabled={busy !== null} onClick={() => remove("all")}>
+          {busy === "all" ? "Removing…" : "Every month"}
+        </button>
+        <button type="button" className="secondary" onClick={onClose} disabled={busy !== null} autoFocus>
+          Cancel
+        </button>
+      </div>
+    </Modal>
+  );
 }
 
 function RemoveExpenseModal({
@@ -1810,10 +2425,6 @@ function AccountField({
   );
 }
 
-function sameAccountScope(left: string | null, right: string | null): boolean {
-  return !left || !right || left === right;
-}
-
 function detailLine(categoryName: string | null, accountName: string | null): string {
   const category = categoryName ?? "No category";
   return accountName ? `${category} · ${accountName}` : category;
@@ -1823,17 +2434,32 @@ function Stat({
   label,
   amount,
   signed = false,
+  note,
 }: {
   label: string;
   amount: number;
   signed?: boolean;
+  note?: string;
 }) {
   return (
     <div className="stat">
       <div className="label">{label}</div>
       <div className={signed ? `value ${moneyClass(amount)}` : "value"}>{formatCad(amount)}</div>
+      {note ? <div className="stat-note">{note}</div> : null}
     </div>
   );
+}
+
+function splitPlanned(total: number, dates: string[]): { date: string; amount: number }[] {
+  if (dates.length === 0) return [];
+  const each = Math.round((total / dates.length) * 100) / 100;
+  return dates.map((date, index) => ({
+    date,
+    amount:
+      index === dates.length - 1
+        ? Math.round((total - each * (dates.length - 1)) * 100) / 100
+        : each,
+  }));
 }
 
 function moneyClass(amount: number): string {
@@ -1842,8 +2468,13 @@ function moneyClass(amount: number): string {
   return "balance";
 }
 
+function formatSignedCad(amount: number): string {
+  if (Math.abs(amount) < 0.005) return formatCad(0);
+  return `${amount > 0 ? "+" : "−"}${formatCad(Math.abs(amount))}`;
+}
+
 function paidSourceLabel(row: BudgetMonthRow): string {
-  if (row.spentSource === "manual") return "Entered by hand";
+  if (row.spentSource === "manual") return "Recorded payment";
   if (row.spentSource === "category") return "From category";
   return "Not recorded";
 }
@@ -1904,50 +2535,6 @@ function formatShortDate(iso: string): string {
     month: "short",
     day: "numeric",
   });
-}
-
-function categoryBlocked(
-  optionId: string,
-  usedIds: Set<string>,
-  categories: Category[],
-  ownId: string | null,
-): boolean {
-  if (optionId === ownId) return false;
-  const related = relatedCategoryIds(optionId, categories);
-  for (const used of usedIds) {
-    if (related.has(used)) return true;
-  }
-  return false;
-}
-
-function relatedCategoryIds(id: string, categories: Category[]): Set<string> {
-  const byId = new Map(categories.map((category) => [category.id, category]));
-  const children = new Map<string, string[]>();
-  for (const category of categories) {
-    if (!category.parentId) continue;
-    const list = children.get(category.parentId) ?? [];
-    list.push(category.id);
-    children.set(category.parentId, list);
-  }
-
-  const ids = new Set<string>();
-  let cursor: string | null = id;
-  while (cursor) {
-    ids.add(cursor);
-    cursor = byId.get(cursor)?.parentId ?? null;
-  }
-
-  const stack = [id];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) continue;
-    for (const child of children.get(current) ?? []) {
-      if (ids.has(child)) continue;
-      ids.add(child);
-      stack.push(child);
-    }
-  }
-  return ids;
 }
 
 function categoryOptionsFor(

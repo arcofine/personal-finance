@@ -2,6 +2,9 @@ import {
   assertYearMonth,
   buildOverview,
   buildWeekForecast,
+  buildWeekFunds,
+  shiftYearMonth,
+  type AccountType,
   type CategoryKind,
   type ExpenseActivity,
   type FixedExpenseMonthAdjustment,
@@ -10,12 +13,15 @@ import {
   type OverviewTransaction,
   type SalaryTemplate,
   type WeekBill,
+  type WeekFund,
+  type WeekFundPlan,
   type WeekMovement,
 } from "@pf/core";
-import { exportFixedExpenses } from "./budgetRepo.js";
+import { budgetMonth, exportFixedExpenses } from "./budgetRepo.js";
 import type { Db } from "./db.js";
 import { getHouseholdId } from "./db.js";
 import { listAccounts } from "./repo.js";
+import { listSavingsPlanTemplates } from "./savingsRepo.js";
 
 export function householdOverview(db: Db, asOfInput: string): OverviewReport {
   const asOf = assertYearMonth(asOfInput);
@@ -31,7 +37,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
   const rows = db
     .prepare(
       `
-      SELECT t.account_id, t.date, t.amount, t.category_id, t.transfer_group_id, c.kind
+      SELECT t.account_id, t.date, t.amount, t.payee, t.category_id, t.transfer_group_id, c.kind
       FROM transactions t
       LEFT JOIN categories c ON c.id = t.category_id AND c.deleted_at IS NULL
       WHERE t.household_id = ? AND t.deleted_at IS NULL
@@ -41,6 +47,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
     account_id: string;
     date: string;
     amount: number;
+    payee: string | null;
     category_id: string | null;
     transfer_group_id: string | null;
     kind: string | null;
@@ -102,6 +109,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
     transactions,
     salaries,
     expenses,
+    savingsPlans: listSavingsPlanTemplates(db),
     adjustments,
     activity,
   });
@@ -111,6 +119,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
     date: row.date,
     amount: row.amount,
     categoryId: row.category_id,
+    payee: row.payee,
     transfer: row.transfer_group_id != null,
   }));
   const dueDayByCategory = latestDueDay(rows);
@@ -135,6 +144,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
 
   return {
     ...overview,
+    weeks: coverageWeeks(db, asOf, listed, rows),
     week: buildWeekForecast({
       today: localToday(),
       accounts: listed.map((account) => ({
@@ -162,6 +172,85 @@ function latestDueDay(
     if (day >= 1 && day <= 31) due.set(row.category_id, day);
   }
   return due;
+}
+
+function coverageWeeks(
+  db: Db,
+  asOf: string,
+  accounts: { id: string; type: AccountType; openingBalance: number }[],
+  rows: {
+    account_id: string;
+    date: string;
+    amount: number;
+    payee: string | null;
+    category_id: string | null;
+    transfer_group_id: string | null;
+  }[],
+): WeekFund[] {
+  const months = [asOf, shiftYearMonth(asOf, 1)];
+  const plans: WeekFundPlan[] = months.flatMap((yearMonth) => {
+    const budget = budgetMonth(db, yearMonth);
+    const income = budget.income.map((row) => ({
+      name: row.name,
+      kind: "income" as const,
+      accountId: row.accountId,
+      categoryId: row.categoryId,
+      dates: row.dates.map((date, index) => ({ date, amount: row.payAmounts[index] ?? 0 })),
+      recorded: row.received,
+    }));
+    const bills = budget.rows.map((row) => ({
+      name: row.name,
+      kind: "expense" as const,
+      accountId: row.accountId,
+      categoryId: row.categoryId,
+      dates: splitTotal(row.planned, row.dates),
+      recorded: row.spent,
+    }));
+    return [...income, ...bills];
+  });
+  const savings = listSavingsPlanTemplates(db);
+
+  return buildWeekFunds({
+    fromMonth: asOf,
+    toMonth: months[1] ?? asOf,
+    accounts: accounts.map((account) => ({
+      id: account.id,
+      type: account.type,
+      openingBalance: account.openingBalance,
+    })),
+    movements: rows.map((row) => ({
+      accountId: row.account_id,
+      date: row.date,
+      amount: row.amount,
+      categoryId: row.category_id,
+      payee: row.payee,
+      transferGroupId: row.transfer_group_id,
+    })),
+    plans,
+    savings: savings.map((plan) => ({
+      toAccountId: plan.toAccountId,
+      amount: plan.amount,
+      frequency: plan.frequency,
+      weekday: plan.weekday,
+      startsOn: plan.startsOn,
+      endsOn: plan.endsOn,
+      omittedMonths: plan.omittedMonths,
+      monthAmounts: plan.monthAmounts,
+      intervals: plan.intervals,
+    })),
+  });
+}
+
+function splitTotal(total: number, dates: string[]): { date: string; amount: number }[] {
+  if (dates.length === 0) return [];
+  const each = Math.round((total / dates.length) * 100) / 100;
+  return dates.map((date, index) => ({
+    date,
+    amount:
+      index === dates.length - 1
+        ? Math.round((total - each * (dates.length - 1)) * 100) / 100
+        : each,
+  }));
 }
 
 function localToday(): string {

@@ -50,6 +50,8 @@ export interface CreateFixedExpenseInput {
   accountId?: string | null;
   startsOn: string;
   carryIn?: number;
+  /** Planned totals that replace the usual amount for those months only. */
+  monthAmounts?: PlannedMonth[];
 }
 
 export interface UpdateFixedExpenseInput {
@@ -63,6 +65,14 @@ export interface UpdateFixedExpenseInput {
   accountId?: string | null;
   carryIn?: number;
   startsOn?: string;
+  /** Replaces every one-month plan. Omit it to leave those months alone. */
+  monthAmounts?: PlannedMonth[];
+}
+
+/** A planned total that applies to one month and no other. */
+export interface PlannedMonth {
+  yearMonth: string;
+  amount: number;
 }
 
 /** Which part of a repeating expense to remove. */
@@ -110,6 +120,22 @@ export interface ExpenseActivity {
   total: number;
 }
 
+/** Category parent link used to see which bills share a branch. */
+export interface CategoryLink {
+  id: string;
+  parentId: string | null;
+}
+
+/** Category spending for one payee, account, and month. */
+export interface CategorySpendSlice {
+  categoryId: string;
+  accountId: string;
+  yearMonth: string;
+  payee: string | null;
+  /** Signed sum. Negative means money left the household. */
+  total: number;
+}
+
 export interface FixedExpenseMonthCalc {
   id: string;
   name: string;
@@ -127,9 +153,11 @@ export interface FixedExpenseMonthCalc {
   broughtForward: number;
   planned: number;
   plannedOverridden: boolean;
+  /** Every one-month plan on this expense, including months other than the one being viewed. */
+  plannedMonths: PlannedMonth[];
   spent: number;
   spentSource: SpentSource;
-  /** broughtForward + planned − spent. This becomes next month's brought forward. */
+  /** Planned minus paid for this month. Positive is under the plan, negative is over. It does not move to the next month. */
   left: number;
 }
 
@@ -177,10 +205,9 @@ export function shiftYearMonth(yearMonth: string, delta: number): string {
 /**
  * Project each fixed expense through `yearMonth`.
  *
- * Balance for a month is the previous month's leftover, plus the plan, minus
- * what was paid. That leftover is the next month's brought-forward balance.
- * Paying less than the plan leaves money in the envelope. Paying more carries
- * a negative balance forward.
+ * Each month stands on its own plan. Left is planned minus paid: positive when
+ * the bill came in under the plan, negative when it went over. That difference
+ * stays in the month and is not carried forward.
  */
 export function buildBudgetMonth(
   yearMonth: string,
@@ -226,12 +253,16 @@ function projectExpense(
       throw new Error("Budget history is too long to roll forward");
     }
     if (monthIsOpen(expense, cursor)) {
-      brought = resolveMonth(expense, cursor, brought, adjustmentByKey, activityByKey).left;
+      brought = 0;
     }
     cursor = shiftYearMonth(cursor, 1);
   }
 
   const current = resolveMonth(expense, yearMonth, brought, adjustmentByKey, activityByKey);
+  const plannedMonths = [...adjustmentByKey.values()]
+    .filter((row) => row.fixedExpenseId === expense.id && row.plannedAmount != null)
+    .map((row) => ({ yearMonth: row.yearMonth, amount: round2(row.plannedAmount ?? 0) }))
+    .sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
   return {
     id: expense.id,
     name: expense.name,
@@ -245,6 +276,7 @@ function projectExpense(
     startsOn: expense.startsOn,
     carryIn: round2(expense.carryIn),
     ...current,
+    plannedMonths,
   };
 }
 
@@ -296,16 +328,15 @@ function resolveMonth(
     spentSource = "none";
   }
 
-  const forward = round2(broughtForward);
   return {
-    broughtForward: forward,
+    broughtForward: round2(broughtForward),
     planned,
     plannedOverridden,
     occurrences: occurrence.count,
     dates: occurrence.dates,
     spent,
     spentSource,
-    left: round2(forward + planned - spent),
+    left: round2(planned - spent),
   };
 }
 
@@ -333,4 +364,89 @@ function sumTotals(rows: FixedExpenseMonthCalc[]): BudgetTotals {
     spent: round2(spent),
     left: round2(left),
   };
+}
+
+/**
+ * Give each category payment to one bill.
+ * A bill that is alone on its category receives every payment in that category
+ * and its subcategories. When several bills share the category, the more
+ * specific category wins, and a tie goes to the bill whose name matches the payee.
+ * Anything still tied is left unassigned so it is not counted twice.
+ */
+export function attributeExpenseActivity(
+  expenses: Pick<FixedExpenseTemplate, "id" | "name" | "categoryId" | "accountId">[],
+  categories: CategoryLink[],
+  slices: CategorySpendSlice[],
+): ExpenseActivity[] {
+  const parentById = new Map(categories.map((category) => [category.id, category.parentId]));
+  const children = new Map<string, string[]>();
+  for (const category of categories) {
+    if (!category.parentId) continue;
+    const list = children.get(category.parentId) ?? [];
+    list.push(category.id);
+    children.set(category.parentId, list);
+  }
+  const trees = new Map<string, Set<string>>();
+  function tree(rootId: string): Set<string> {
+    const cached = trees.get(rootId);
+    if (cached) return cached;
+    const ids = new Set<string>();
+    const stack = [rootId];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (!id || ids.has(id)) continue;
+      ids.add(id);
+      for (const child of children.get(id) ?? []) stack.push(child);
+    }
+    trees.set(rootId, ids);
+    return ids;
+  }
+  function depth(id: string): number {
+    let level = 0;
+    let cursor: string | null = id;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      level += 1;
+      cursor = parentById.get(cursor) ?? null;
+    }
+    return level;
+  }
+
+  const linked = expenses.filter((expense) => expense.categoryId);
+  const totals = new Map<string, number>();
+  for (const slice of slices) {
+    const hits = linked.filter((expense) => {
+      if (!expense.categoryId || !tree(expense.categoryId).has(slice.categoryId)) return false;
+      return !expense.accountId || expense.accountId === slice.accountId;
+    });
+    if (hits.length === 0) continue;
+    const deepest = Math.max(...hits.map((expense) => depth(expense.categoryId ?? "")));
+    let chosen = hits.filter((expense) => depth(expense.categoryId ?? "") === deepest);
+    if (chosen.length > 1) {
+      const named = chosen.filter((expense) => payeeMatches(slice.payee, expense.name));
+      if (named.length !== 1) continue;
+      chosen = named;
+    }
+    const winner = chosen[0];
+    if (!winner) continue;
+    const key = `${winner.id}|${slice.yearMonth}`;
+    totals.set(key, (totals.get(key) ?? 0) + slice.total);
+  }
+
+  const activity: ExpenseActivity[] = [];
+  for (const [key, total] of totals) {
+    const splitAt = key.indexOf("|");
+    activity.push({
+      fixedExpenseId: key.slice(0, splitAt),
+      yearMonth: key.slice(splitAt + 1),
+      total: round2(total),
+    });
+  }
+  return activity;
+}
+
+function payeeMatches(payee: string | null, name: string): boolean {
+  if (!payee) return false;
+  return payee.trim().toLocaleLowerCase("en-CA") === name.trim().toLocaleLowerCase("en-CA");
 }

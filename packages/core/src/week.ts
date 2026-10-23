@@ -4,6 +4,7 @@ import {
   addDays,
   assertISODate,
   dateOnDay,
+  occurrencesFor,
   paycheckAmount,
   weekdayOf,
   type PayFrequency,
@@ -25,6 +26,8 @@ export interface WeekMovement {
   date: string;
   amount: number;
   categoryId: string | null;
+  /** Payee, used when more than one bill shares the category. */
+  payee?: string | null;
   transfer: boolean;
 }
 
@@ -130,13 +133,7 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
 
   for (const bill of input.bills) {
     for (const date of billDates(bill, from, to)) {
-      const override = adjustments.find(
-        (row) => row.fixedExpenseId === bill.id && row.yearMonth === date.slice(0, 7),
-      );
-      const amount =
-        bill.frequency === "monthly" && override?.plannedAmount != null
-          ? round2(override.plannedAmount)
-          : round2(bill.amount);
+      const amount = amountOnDate(bill, date, adjustments);
       scheduled.push({
         date,
         kind: "expense",
@@ -154,7 +151,7 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
   scheduled.sort(compareItems);
   const unused = input.movements.filter((movement) => !movement.transfer);
   for (const item of scheduled) {
-    const index = unused.findIndex((movement) => matchesRecorded(item, movement));
+    const index = unused.findIndex((movement) => matchesRecorded(item, movement, scheduled));
     if (index < 0) continue;
     unused.splice(index, 1);
     item.recorded = true;
@@ -198,6 +195,37 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
   });
 
   return { from, to, items: scheduled, accounts };
+}
+
+function amountOnDate(
+  bill: WeekBill,
+  date: string,
+  adjustments: FixedExpenseMonthAdjustment[],
+): number {
+  const yearMonth = date.slice(0, 7);
+  const override = adjustments.find(
+    (row) => row.fixedExpenseId === bill.id && row.yearMonth === yearMonth,
+  );
+  if (override?.plannedAmount == null) return round2(bill.amount);
+  const dates = occurrencesFor(
+    yearMonth,
+    bill.frequency,
+    bill.weekday,
+    bill.anchorDate,
+    bill.dueDay,
+  ).dates;
+  const index = dates.indexOf(date);
+  if (index < 0) return round2(bill.amount);
+  return shareOfTotal(override.plannedAmount, dates.length, index);
+}
+
+/** Last date in the month keeps the rounding remainder. */
+function shareOfTotal(total: number, count: number, index: number): number {
+  if (count <= 1) return round2(total);
+  const cents = Math.round(total * 100);
+  const base = Math.floor(cents / count);
+  const last = cents - base * (count - 1);
+  return (index === count - 1 ? last : base) / 100;
 }
 
 function billDates(bill: WeekBill, from: string, to: string): string[] {
@@ -264,15 +292,35 @@ function cadenceDates(
   return dates;
 }
 
-function matchesRecorded(item: WeekForecastItem, movement: WeekMovement): boolean {
+function matchesRecorded(
+  item: WeekForecastItem,
+  movement: WeekMovement,
+  scheduled: WeekForecastItem[],
+): boolean {
   if (movement.date !== item.date) return false;
   if (item.accountId && movement.accountId !== item.accountId) return false;
   const incoming = movement.amount > 0;
   if (item.kind === "income" && !incoming) return false;
   if (item.kind === "expense" && incoming) return false;
-  if (item.categoryId && movement.categoryId === item.categoryId) return true;
   const expected = item.kind === "income" ? item.amount : -item.amount;
-  return Math.abs(movement.amount - expected) < 0.001;
+  const amountHit = Math.abs(movement.amount - expected) < 0.001;
+  const categoryHit = Boolean(item.categoryId && movement.categoryId === item.categoryId);
+  if (!categoryHit) return amountHit;
+  const shared = scheduled.some(
+    (other) =>
+      other !== item &&
+      other.date === item.date &&
+      other.kind === item.kind &&
+      other.categoryId === item.categoryId &&
+      (!other.accountId || other.accountId === movement.accountId),
+  );
+  if (!shared) return true;
+  return payeeMatches(movement.payee, item.name);
+}
+
+function payeeMatches(payee: string | null | undefined, name: string): boolean {
+  if (!payee) return false;
+  return payee.trim().toLocaleLowerCase("en-CA") === name.trim().toLocaleLowerCase("en-CA");
 }
 
 function compareItems(a: WeekForecastItem, b: WeekForecastItem): number {

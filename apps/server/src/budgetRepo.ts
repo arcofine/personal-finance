@@ -1,6 +1,7 @@
 import {
   assertISODate,
   assertYearMonth,
+  attributeExpenseActivity,
   buildBudgetMonth,
   buildSalaryMonth,
   monthBounds,
@@ -21,6 +22,7 @@ import {
   type FixedExpenseRemoval,
   type FixedExpenseTemplate,
   type PayFrequency,
+  type PlannedMonth,
   type Salary,
   type SalaryRate,
   type SalaryReceipt,
@@ -234,46 +236,13 @@ function categoryTree(categories: CategoryNode[], rootId: string): Set<string> {
   return ids;
 }
 
-function assertCategoryAvailable(
-  db: Db,
-  categoryId: string | null,
-  accountId: string | null,
-  exceptExpenseId?: string,
-): void {
+function assertExpenseCategory(db: Db, categoryId: string | null): void {
   if (!categoryId) return;
   const categories = loadCategories(db);
   const category = categories.find((row) => row.id === categoryId);
   if (!category) throw new Error("Category not found");
   if (category.kind !== "expense") {
     throw new Error("Link an expense category so spending counts against this bill");
-  }
-
-  const mine = categoryTree(categories, categoryId);
-  const others = db
-    .prepare(
-      `
-      SELECT id, name, category_id, account_id
-      FROM fixed_expenses
-      WHERE deleted_at IS NULL AND category_id IS NOT NULL AND id != ?
-    `,
-    )
-    .all(exceptExpenseId ?? "") as {
-    id: string;
-    name: string;
-    category_id: string;
-    account_id: string | null;
-  }[];
-
-  for (const other of others) {
-    if (!sameAccountScope(accountId, other.account_id)) continue;
-    const theirs = categoryTree(categories, other.category_id);
-    for (const id of mine) {
-      if (theirs.has(id)) {
-        throw new Error(
-          `That category overlaps "${other.name}", so the same spending would count twice`,
-        );
-      }
-    }
   }
 }
 
@@ -407,7 +376,7 @@ function loadActivity(
   const totals = db
     .prepare(
       `
-      SELECT category_id, account_id, substr(date, 1, 7) AS year_month, SUM(amount) AS total
+      SELECT category_id, account_id, substr(date, 1, 7) AS year_month, payee, SUM(amount) AS total
       FROM transactions
       WHERE household_id = ?
         AND deleted_at IS NULL
@@ -415,35 +384,28 @@ function loadActivity(
         AND category_id IS NOT NULL
         AND date >= ?
         AND date <= ?
-      GROUP BY category_id, account_id, substr(date, 1, 7)
+      GROUP BY category_id, account_id, substr(date, 1, 7), payee
     `,
     )
     .all(householdId, `${earliest}-01`, to) as {
     category_id: string;
     account_id: string;
     year_month: string;
+    payee: string | null;
     total: number;
   }[];
 
-  const activity: ExpenseActivity[] = [];
-  for (const expense of linked) {
-    if (!expense.categoryId) continue;
-    const ids = categoryTree(categories, expense.categoryId);
-    const byMonth = new Map<string, number>();
-    for (const row of totals) {
-      if (!ids.has(row.category_id)) continue;
-      if (expense.accountId && row.account_id !== expense.accountId) continue;
-      byMonth.set(row.year_month, (byMonth.get(row.year_month) ?? 0) + row.total);
-    }
-    for (const [month, total] of byMonth) {
-      activity.push({
-        fixedExpenseId: expense.id,
-        yearMonth: month,
-        total: round2(total),
-      });
-    }
-  }
-  return activity;
+  return attributeExpenseActivity(
+    linked,
+    categories.map((category) => ({ id: category.id, parentId: category.parent_id })),
+    totals.map((row) => ({
+      categoryId: row.category_id,
+      accountId: row.account_id,
+      yearMonth: row.year_month,
+      payee: row.payee,
+      total: row.total,
+    })),
+  );
 }
 
 export function createFixedExpense(db: Db, input: CreateFixedExpenseInput): FixedExpense {
@@ -459,7 +421,7 @@ export function createFixedExpense(db: Db, input: CreateFixedExpenseInput): Fixe
   });
   const categoryId = input.categoryId || null;
   const accountId = parseAccountId(db, input.accountId);
-  assertCategoryAvailable(db, categoryId, accountId);
+  assertExpenseCategory(db, categoryId);
 
   const id = newId();
   const stamp = nowIso();
@@ -488,6 +450,7 @@ export function createFixedExpense(db: Db, input: CreateFixedExpenseInput): Fixe
     stamp,
   );
 
+  if (input.monthAmounts) replacePlannedMonths(db, id, schedule.startsOn, input.monthAmounts);
   return mapExpense(getActive(db, id)!);
 }
 
@@ -535,7 +498,7 @@ export function updateFixedExpense(
   });
 
   if (categoryId !== existing.category_id || accountId !== existing.account_id) {
-    assertCategoryAvailable(db, categoryId, accountId, id);
+    assertExpenseCategory(db, categoryId);
   }
 
   const stamp = nowIso();
@@ -561,6 +524,9 @@ export function updateFixedExpense(
     id,
   );
 
+  if (input.monthAmounts) {
+    replacePlannedMonths(db, id, schedule.startsOn, input.monthAmounts);
+  }
   return mapExpense(getActive(db, id)!);
 }
 
@@ -650,6 +616,69 @@ function loadOmittedMonths(db: Db, householdId: string): Map<string, string[]> {
     omitted.set(row.fixed_expense_id, months);
   }
   return omitted;
+}
+
+/**
+ * Replace every one-month plan. A month left off the list goes back to the usual amount.
+ * Hand-entered payments on those months stay.
+ */
+function replacePlannedMonths(
+  db: Db,
+  expenseId: string,
+  startsOn: string,
+  months: PlannedMonth[],
+): void {
+  const parsed = parseMonthAmounts(months);
+  const endsOn = (
+    db.prepare(`SELECT ends_on FROM fixed_expenses WHERE id = ?`).get(expenseId) as
+      | { ends_on: string | null }
+      | undefined
+  )?.ends_on;
+  const omitted = new Set(
+    (
+      db
+        .prepare(
+          `SELECT year_month FROM fixed_expense_months WHERE fixed_expense_id = ? AND omitted = 1`,
+        )
+        .all(expenseId) as { year_month: string }[]
+    ).map((row) => row.year_month),
+  );
+  for (const month of parsed) {
+    if (month.yearMonth < startsOn) throw new Error("That month is before this expense starts");
+    if (endsOn && month.yearMonth > endsOn) throw new Error("That month is after this expense ends");
+    if (omitted.has(month.yearMonth)) throw new Error("That month was removed from this expense");
+  }
+  const existing = db
+    .prepare(
+      `SELECT year_month, planned_amount FROM fixed_expense_months WHERE fixed_expense_id = ?`,
+    )
+    .all(expenseId) as { year_month: string; planned_amount: number | null }[];
+  const next = new Set(parsed.map((month) => month.yearMonth));
+  for (const row of existing) {
+    if (row.planned_amount == null || next.has(row.year_month)) continue;
+    setFixedExpenseMonth(db, expenseId, row.year_month, { plannedAmount: null });
+  }
+  for (const month of parsed) {
+    setFixedExpenseMonth(db, expenseId, month.yearMonth, { plannedAmount: month.amount });
+  }
+}
+
+function parseMonthAmounts(value: PlannedMonth[]): PlannedMonth[] {
+  if (!Array.isArray(value)) throw new Error("Month amounts must be a list");
+  const seen = new Set<string>();
+  const months: PlannedMonth[] = [];
+  for (const item of value) {
+    const record = item as { yearMonth?: unknown; amount?: unknown };
+    const yearMonth = assertYearMonth(typeof record.yearMonth === "string" ? record.yearMonth : "");
+    if (seen.has(yearMonth)) throw new Error("Two amounts cannot apply to the same month");
+    seen.add(yearMonth);
+    months.push({
+      yearMonth,
+      amount: parseMoney(record.amount, "Planned amount", false),
+    });
+  }
+  months.sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+  return months;
 }
 
 /**

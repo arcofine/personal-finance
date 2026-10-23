@@ -155,4 +155,58 @@ describe("buildWeekForecast", () => {
     const outside = buildWeekForecast(input({ bills: [rent()], salaries: [] }));
     assert.equal(outside.items.length, 0);
   });
+
+  it("records a shared category payment on the bill with the same name", () => {
+    const week = buildWeekForecast(
+      input({
+        today: "2026-10-21",
+        salaries: [],
+        accounts: [{ id: "rbc", name: "RBC", type: "checking", balance: 500 }],
+        bills: [
+          rent({ id: "loan", name: "Pret Etudiant", amount: 186, categoryId: "lifestyle", dueDay: 23 }),
+          rent({ id: "other", name: "Other lifestyle", amount: 40, categoryId: "lifestyle", dueDay: 23 }),
+        ],
+        movements: [
+          {
+            accountId: "rbc",
+            date: "2026-10-23",
+            amount: -186,
+            categoryId: "lifestyle",
+            payee: "Pret Etudiant",
+            transfer: false,
+          },
+        ],
+      }),
+    );
+    const loan = week.items.find((item) => item.name === "Pret Etudiant");
+    const other = week.items.find((item) => item.name === "Other lifestyle");
+    assert.equal(loan?.recorded, true);
+    assert.equal(other?.recorded, false);
+    assert.equal(week.accounts[0]?.projected, 500 - 40);
+  });
+
+  it("splits a one-month plan across that month's dates", () => {
+    const week = buildWeekForecast(
+      input({
+        salaries: [],
+        bills: [
+          rent({
+            id: "coffee",
+            name: "Coffee",
+            amount: 50,
+            frequency: "weekly",
+            weekday: "friday",
+            dueDay: null,
+            accountId: "td",
+          }),
+        ],
+        adjustments: [
+          { fixedExpenseId: "coffee", yearMonth: "2026-10", plannedAmount: 100, paidAmount: null },
+        ],
+      }),
+    );
+    const coffee = week.items.find((item) => item.name === "Coffee");
+    assert.equal(coffee?.date, "2026-10-23");
+    assert.equal(coffee?.amount, 20);
+  });
 });

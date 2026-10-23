@@ -1,8 +1,10 @@
 import type { AccountType, CategoryKind } from "./types.js";
 import { buildBudgetMonth, shiftYearMonth, type ExpenseActivity, type FixedExpenseMonthAdjustment, type FixedExpenseTemplate } from "./budget.js";
 import { buildSalaryMonth, type SalaryTemplate } from "./schedule.js";
+import { buildSavingsMonth, type SavingsPlanTemplate } from "./savings.js";
 import { monthBounds, round2 } from "./spend.js";
 import type { WeekForecast } from "./week.js";
+import type { WeekFund } from "./weekFunds.js";
 
 export interface OverviewAccount {
   id: string;
@@ -30,6 +32,8 @@ export interface OverviewInput {
   transactions: OverviewTransaction[];
   salaries: SalaryTemplate[];
   expenses: FixedExpenseTemplate[];
+  /** Repeating objectives for savings and placement accounts. */
+  savingsPlans?: SavingsPlanTemplate[];
   adjustments?: FixedExpenseMonthAdjustment[];
   activity?: ExpenseActivity[];
 }
@@ -63,7 +67,9 @@ export interface OverviewPoint {
   expectedIncome: number;
   /** Fixed bills planned that month. */
   plannedExpenses: number;
-  /** Expected pay minus planned fixed bills. */
+  /** Savings and placement objectives planned that month. */
+  plannedSavings: number;
+  /** Expected pay minus planned fixed bills and planned savings. */
   predictedLeft: number;
 }
 
@@ -80,16 +86,18 @@ export interface Overview {
 
 export interface OverviewReport extends Overview {
   week: WeekForecast;
+  /** Chequing coverage for the current month and the next one. */
+  weeks: WeekFund[];
 }
 
 const DEFAULT_SPAN = 6;
 
 /**
  * Household picture: recorded spending, savings and placement balances,
- * and a forecast of paychecks minus fixed bills.
+ * and a forecast of paychecks minus fixed bills and savings objectives.
  * Transfers move balances and are not counted as expenses.
  * Months after `asOf` are not guessed for variable spending or for
- * savings and placement balances.
+ * savings and placement balances. The savings bar is the planned objective.
  */
 export function buildOverview(input: OverviewInput): Overview {
   const asOf = input.asOf;
@@ -154,6 +162,7 @@ export function buildOverview(input: OverviewInput): Overview {
       adjustments,
       activity,
     ).totals.planned;
+    const plannedSavings = buildSavingsMonth(yearMonth, input.savingsPlans ?? [], []).totals.planned;
     return {
       yearMonth,
       expenses: recorded ? round2(expensesByMonth.get(yearMonth) ?? 0) : null,
@@ -162,7 +171,8 @@ export function buildOverview(input: OverviewInput): Overview {
       placements: recorded ? sumTypeAt(balances, "placement", txsByAccount, to) : null,
       expectedIncome,
       plannedExpenses,
-      predictedLeft: round2(expectedIncome - plannedExpenses),
+      plannedSavings,
+      predictedLeft: round2(expectedIncome - plannedExpenses - plannedSavings),
     };
   });
 
