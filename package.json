@@ -1,0 +1,23 @@
+{
+  "name": "personal-finance",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first household finance app (CAD) — browser UI + local API + SQLite",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "postinstall": "npm run build -w @pf/core",
+    "dev": "npm run dev -w @pf/server & npm run dev -w @pf/web",
+    "dev:server": "npm run dev -w @pf/server",
+    "dev:web": "npm run dev -w @pf/web",
+    "build": "npm run build -w @pf/core && npm run build -w @pf/server && npm run build -w @pf/web",
+    "build:core": "npm run build -w @pf/core",
+    "typecheck": "npm run typecheck -w @pf/core && npm run typecheck -w @pf/server && npm run typecheck -w @pf/web",
+    "start": "npm run start -w @pf/server"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  }
+}
