@@ -70,6 +70,8 @@ export interface WeekForecastItem {
   accountId: string | null;
   accountName: string | null;
   categoryId: string | null;
+  /** How often an expense repeats. Null for a paycheck. */
+  frequency: PayFrequency | null;
   /** Already entered on the register, so the current balance includes it. */
   recorded: boolean;
   /** Account balance after this item. Null when it is already recorded or has no account. */
@@ -125,6 +127,7 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
         accountId: salary.accountId,
         accountName: salary.accountId ? (names.get(salary.accountId) ?? null) : null,
         categoryId: salary.categoryId,
+        frequency: null,
         recorded: false,
         balanceAfter: null,
       });
@@ -142,6 +145,7 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
         accountId: bill.accountId,
         accountName: bill.accountId ? (names.get(bill.accountId) ?? null) : null,
         categoryId: bill.categoryId,
+        frequency: bill.frequency,
         recorded: false,
         balanceAfter: null,
       });
@@ -151,7 +155,7 @@ export function buildWeekForecast(input: WeekForecastInput): WeekForecast {
   scheduled.sort(compareItems);
   const unused = input.movements.filter((movement) => !movement.transfer);
   for (const item of scheduled) {
-    const index = unused.findIndex((movement) => matchesRecorded(item, movement, scheduled));
+    const index = bestRecordedMatch(item, unused, scheduled);
     if (index < 0) continue;
     unused.splice(index, 1);
     item.recorded = true;
@@ -292,24 +296,47 @@ function cadenceDates(
   return dates;
 }
 
+function bestRecordedMatch(
+  item: WeekForecastItem,
+  movements: WeekMovement[],
+  scheduled: WeekForecastItem[],
+): number {
+  const expected = item.kind === "income" ? item.amount : -item.amount;
+  let best = -1;
+  let bestGap = Number.POSITIVE_INFINITY;
+  movements.forEach((movement, index) => {
+    if (!matchesRecorded(item, movement, scheduled)) return;
+    const gap = Math.abs(movement.amount - expected);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = index;
+    }
+  });
+  return best;
+}
+
 function matchesRecorded(
   item: WeekForecastItem,
   movement: WeekMovement,
   scheduled: WeekForecastItem[],
 ): boolean {
-  if (movement.date !== item.date) return false;
   if (item.accountId && movement.accountId !== item.accountId) return false;
   const incoming = movement.amount > 0;
   if (item.kind === "income" && !incoming) return false;
   if (item.kind === "expense" && incoming) return false;
+  const sameMonth = movement.date.slice(0, 7) === item.date.slice(0, 7);
+  if (!sameMonth) return false;
+  // A weekly or bi-weekly bill is a different occurrence on a different day.
+  // A monthly bill is paid once, and the payment can land before the due day.
+  if (movement.date !== item.date && item.frequency !== "monthly") return false;
   const expected = item.kind === "income" ? item.amount : -item.amount;
   const amountHit = Math.abs(movement.amount - expected) < 0.001;
   const categoryHit = Boolean(item.categoryId && movement.categoryId === item.categoryId);
-  if (!categoryHit) return amountHit;
+  if (!categoryHit) return movement.date === item.date && amountHit;
   const shared = scheduled.some(
     (other) =>
       other !== item &&
-      other.date === item.date &&
+      other.date.slice(0, 7) === item.date.slice(0, 7) &&
       other.kind === item.kind &&
       other.categoryId === item.categoryId &&
       (!other.accountId || other.accountId === movement.accountId),

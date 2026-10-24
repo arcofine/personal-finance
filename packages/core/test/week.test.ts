@@ -185,6 +185,62 @@ describe("buildWeekForecast", () => {
     assert.equal(week.accounts[0]?.projected, 500 - 40);
   });
 
+  it("treats a monthly bill paid earlier in the month as already recorded", () => {
+    const week = buildWeekForecast(
+      input({
+        today: "2026-10-24",
+        salaries: [],
+        accounts: [{ id: "td", name: "TD", type: "checking", balance: 1129.69 }],
+        bills: [
+          rent({
+            id: "card",
+            name: "Credit Card TD",
+            amount: 1600,
+            dueDay: 27,
+            accountId: "td",
+            categoryId: "card",
+          }),
+          rent({
+            id: "vw",
+            name: "VW",
+            amount: 110,
+            frequency: "weekly",
+            weekday: "tuesday",
+            dueDay: null,
+            accountId: "td",
+            categoryId: "car",
+          }),
+        ],
+        movements: [
+          {
+            accountId: "td",
+            date: "2026-10-23",
+            amount: -1615.67,
+            categoryId: "card",
+            payee: "Credit Card TD",
+            transfer: false,
+          },
+          {
+            accountId: "td",
+            date: "2026-10-22",
+            amount: -330,
+            categoryId: "car",
+            payee: "VW",
+            transfer: false,
+          },
+        ],
+      }),
+    );
+    const card = week.items.find((item) => item.name === "Credit Card TD");
+    const vw = week.items.find((item) => item.name === "VW");
+    assert.equal(card?.recorded, true);
+    assert.equal(vw?.date, "2026-10-27");
+    assert.equal(vw?.recorded, false);
+    const td = week.accounts.find((account) => account.accountId === "td");
+    assert.equal(td?.alert, false);
+    assert.equal(td?.projected, 1129.69 - 110);
+  });
+
   it("splits a one-month plan across that month's dates", () => {
     const week = buildWeekForecast(
       input({
