@@ -18,3 +18,4 @@ packages/core/dist/
 .vite/
 coverage/
 *.log
+start-finance.bat
