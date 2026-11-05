@@ -192,6 +192,78 @@ describe("buildWeekFunds", () => {
     assert.equal(weekOf(funds, "2026-10-05")?.shortfall, 30);
   });
 
+  it("does not charge a bill again when it was paid from the other chequing account", () => {
+    const funds = buildWeekFunds({
+      fromMonth: "2026-11",
+      toMonth: "2026-11",
+      accounts: [
+        { id: "rbc", type: "checking", openingBalance: 2650.65 },
+        { id: "td", type: "checking", openingBalance: 0 },
+      ],
+      movements: [
+        {
+          accountId: "rbc",
+          date: "2026-11-01",
+          amount: -2120,
+          categoryId: "rent",
+          payee: "Rent Rivero",
+          transferGroupId: null,
+        },
+      ],
+      plans: [
+        {
+          name: "Rent Rivero",
+          kind: "expense",
+          accountId: "td",
+          categoryId: "rent",
+          dates: [{ date: "2026-11-01", amount: 2120 }],
+          recorded: 0,
+        },
+      ],
+      savings: [],
+    });
+    const sunday = weekOf(funds, "2026-11-01");
+    const week = weekOf(funds, "2026-11-02");
+    assert.equal(sunday?.billsDue, 0);
+    assert.equal(sunday?.recordedOut, 2120);
+    assert.equal(sunday?.closing, 530.65);
+    assert.equal(week?.opening, 530.65);
+  });
+
+  it("still expects a bill when the other account paid a different name", () => {
+    const funds = buildWeekFunds({
+      fromMonth: "2026-11",
+      toMonth: "2026-11",
+      accounts: [
+        { id: "rbc", type: "checking", openingBalance: 3000 },
+        { id: "td", type: "checking", openingBalance: 0 },
+      ],
+      movements: [
+        {
+          accountId: "rbc",
+          date: "2026-11-01",
+          amount: -50,
+          categoryId: "rent",
+          payee: "Groceries",
+          transferGroupId: null,
+        },
+      ],
+      plans: [
+        {
+          name: "Rent Rivero",
+          kind: "expense",
+          accountId: "td",
+          categoryId: "rent",
+          dates: [{ date: "2026-11-01", amount: 2120 }],
+          recorded: 0,
+        },
+      ],
+      savings: [],
+    });
+    assert.equal(weekOf(funds, "2026-11-01")?.billsDue, 2120);
+    assert.equal(weekOf(funds, "2026-11-02")?.opening, 3000 - 50 - 2120);
+  });
+
   it("uses a date range amount on each usual day it covers", () => {
     const funds = buildWeekFunds({
       fromMonth: "2026-10",

@@ -372,6 +372,8 @@ function sumTotals(rows: FixedExpenseMonthCalc[]): BudgetTotals {
  * and its subcategories. When several bills share the category, the more
  * specific category wins, and a tie goes to the bill whose name matches the payee.
  * Anything still tied is left unassigned so it is not counted twice.
+ * A payment from a different account still counts when the payee is exactly
+ * one bill's name, so money that already left is not left looking unpaid.
  */
 export function attributeExpenseActivity(
   expenses: Pick<FixedExpenseTemplate, "id" | "name" | "categoryId" | "accountId">[],
@@ -416,11 +418,18 @@ export function attributeExpenseActivity(
   const linked = expenses.filter((expense) => expense.categoryId);
   const totals = new Map<string, number>();
   for (const slice of slices) {
-    const hits = linked.filter((expense) => {
+    let hits = linked.filter((expense) => {
       if (!expense.categoryId || !tree(expense.categoryId).has(slice.categoryId)) return false;
       return !expense.accountId || expense.accountId === slice.accountId;
     });
-    if (hits.length === 0) continue;
+    if (hits.length === 0) {
+      const named = linked.filter((expense) => {
+        if (!expense.categoryId || !tree(expense.categoryId).has(slice.categoryId)) return false;
+        return payeeMatches(slice.payee, expense.name);
+      });
+      if (named.length !== 1) continue;
+      hits = named;
+    }
     const deepest = Math.max(...hits.map((expense) => depth(expense.categoryId ?? "")));
     let chosen = hits.filter((expense) => depth(expense.categoryId ?? "") === deepest);
     if (chosen.length > 1) {

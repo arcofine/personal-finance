@@ -213,12 +213,22 @@ function matchesPlan(
   plans: WeekFundPlan[],
 ): boolean {
   if (movement.transferGroupId) return false;
-  if (plan.accountId && movement.accountId !== plan.accountId) return false;
   const incoming = movement.amount > 0;
   if (plan.kind === "income" ? !incoming : incoming) return false;
   const amountHit = Math.abs(Math.abs(movement.amount) - dated.amount) < 0.02;
   const categoryHit = Boolean(plan.categoryId && movement.categoryId === plan.categoryId);
   const sameMonth = movement.date.slice(0, 7) === dated.date.slice(0, 7);
+  const sameAccount = !plan.accountId || movement.accountId === plan.accountId;
+
+  // The bill is planned on one chequing account and the money left the other.
+  // It is already out of the combined balance, so it must not be due again.
+  if (!sameAccount) {
+    if (!payeeMatches(movement.payee, plan.name) || !amountHit) return false;
+    if (plan.categoryId && movement.categoryId !== plan.categoryId) return false;
+    if (movement.date === dated.date) return true;
+    const datesThisMonth = plan.dates.filter((item) => item.date.slice(0, 7) === dated.date.slice(0, 7));
+    return sameMonth && datesThisMonth.length === 1;
+  }
 
   if (movement.date === dated.date) {
     if (!categoryHit) return amountHit;

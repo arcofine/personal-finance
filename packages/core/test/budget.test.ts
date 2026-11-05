@@ -277,4 +277,33 @@ describe("attributeExpenseActivity", () => {
     assert.equal(byId.get("rent-bill"), -2120);
     assert.equal(byId.get("housing-bill"), undefined);
   });
+
+  it("counts a payment from another account when the payee is that bill", () => {
+    const activity = attributeExpenseActivity(
+      [{ id: "rent-bill", name: "Rent Rivero", categoryId: "rent", accountId: "td" }],
+      categories,
+      [{ categoryId: "rent", accountId: "rbc", yearMonth: "2026-11", payee: "Rent Rivero", total: -2120 }],
+    );
+    assert.deepEqual(
+      activity.map((row) => [row.fixedExpenseId, row.total]),
+      [["rent-bill", -2120]],
+    );
+  });
+
+  it("leaves a different payee on another account unassigned", () => {
+    const activity = attributeExpenseActivity(
+      [{ id: "fee", name: "TD Account Fee", categoryId: "lifestyle", accountId: "td" }],
+      categories,
+      [
+        {
+          categoryId: "lifestyle",
+          accountId: "rbc",
+          yearMonth: "2026-11",
+          payee: "Assurance Compte RBC",
+          total: -20.6,
+        },
+      ],
+    );
+    assert.equal(activity.length, 0);
+  });
 });
