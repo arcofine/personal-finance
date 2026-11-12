@@ -44,6 +44,9 @@ describe("buildWeekFunds", () => {
     assert.equal(week?.billsDue, 0);
     assert.equal(week?.closing, 880);
     assert.equal(week?.covered, true);
+    assert.deepEqual(week?.inflows, []);
+    assert.deepEqual(week?.outflows, [{ date: "2026-10-01", name: "Rent Rivero", amount: 2120 }]);
+    assert.deepEqual(week?.bills, []);
   });
 
   it("shows a shortfall when the bill comes before the paycheck", () => {
@@ -81,6 +84,7 @@ describe("buildWeekFunds", () => {
     assert.equal(week?.shortfall, 300);
     assert.equal(week?.closing, 700);
     assert.equal(week?.covered, false);
+    assert.deepEqual(week?.bills, [{ date: "2026-10-05", name: "Rent", amount: 800 }]);
   });
 
   it("treats a transfer already made as covering the savings objective", () => {
@@ -119,6 +123,9 @@ describe("buildWeekFunds", () => {
     });
     assert.equal(weekOf(covered, "2026-10-01")?.savingsDue, 0);
     assert.equal(weekOf(covered, "2026-10-01")?.closing, 400);
+    assert.deepEqual(weekOf(covered, "2026-10-01")?.outflows, [
+      { date: "2026-10-01", name: "Transfer → CELI", amount: 600 },
+    ]);
 
     const waiting = buildWeekFunds({
       fromMonth: "2026-10",
@@ -285,5 +292,60 @@ describe("buildWeekFunds", () => {
     assert.equal(weekOf(funds, "2026-10-05")?.savingsDue, 50);
     assert.equal(weekOf(funds, "2026-10-12")?.savingsDue, 30);
     assert.equal(weekOf(funds, "2026-10-19")?.savingsDue, 30);
+  });
+
+  it("lists each deposit, withdrawal, and the part of a bill still unpaid", () => {
+    const funds = buildWeekFunds({
+      fromMonth: "2026-10",
+      toMonth: "2026-10",
+      accounts: [{ ...checking, openingBalance: 1000 }],
+      movements: [
+        {
+          accountId: "rbc",
+          date: "2026-10-01",
+          amount: 400,
+          categoryId: "salary",
+          payee: "Paie",
+          transferGroupId: null,
+        },
+        {
+          accountId: "rbc",
+          date: "2026-10-02",
+          amount: -25,
+          categoryId: "food",
+          payee: null,
+          transferGroupId: null,
+        },
+        {
+          accountId: "rbc",
+          date: "2026-10-02",
+          amount: -15,
+          categoryId: "food",
+          payee: "Cafe",
+          transferGroupId: null,
+        },
+      ],
+      plans: [
+        {
+          name: "Hydro",
+          kind: "expense",
+          accountId: "rbc",
+          categoryId: "hydro",
+          dates: [{ date: "2026-10-03", amount: 100 }],
+          recorded: 40,
+        },
+      ],
+      savings: [],
+    });
+    const week = weekOf(funds, "2026-10-01");
+    assert.deepEqual(week?.inflows, [{ date: "2026-10-01", name: "Paie", amount: 400 }]);
+    assert.deepEqual(week?.outflows, [
+      { date: "2026-10-02", name: "—", amount: 25 },
+      { date: "2026-10-02", name: "Cafe", amount: 15 },
+    ]);
+    assert.deepEqual(week?.bills, [{ date: "2026-10-03", name: "Hydro", amount: 60 }]);
+    assert.equal(week?.recordedIn, 400);
+    assert.equal(week?.recordedOut, 40);
+    assert.equal(week?.billsDue, 60);
   });
 });

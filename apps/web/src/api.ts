@@ -198,7 +198,56 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+
+  importBackup: async (file: File) => {
+    const format = await backupFormat(file);
+    if (format === "json") {
+      const text = (await file.text()).replace(/^\uFEFF/, "");
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error("This JSON file could not be read.");
+      }
+      return request<BackupImportResult>("/api/backup/import/json", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    }
+    const res = await fetch("/api/backup/import/sqlite", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: await file.arrayBuffer(),
+    });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) message = body.error;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message || "This backup could not be read.");
+    }
+    return res.json() as Promise<BackupImportResult>;
+  },
 };
+
+export interface BackupImportResult {
+  accounts: number;
+  transactions: number;
+  categories: number;
+}
+
+async function backupFormat(file: File): Promise<"json" | "sqlite"> {
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const marker = String.fromCharCode(...head);
+  if (marker.startsWith("SQLite format 3")) return "sqlite";
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".json") || marker.trimStart().startsWith("{")) return "json";
+  if (name.endsWith(".db") || name.endsWith(".sqlite") || name.endsWith(".sqlite3")) return "sqlite";
+  throw new Error("Choose a JSON or SQLite backup.");
+}
 
 export const ACCOUNT_TYPES: { value: AccountType; label: string }[] = [
   { value: "checking", label: "Checking / Chequing (CC)" },

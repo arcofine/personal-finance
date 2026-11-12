@@ -9,6 +9,7 @@ import { openDatabase } from "./db.js";
 import * as savingsRepo from "./savingsRepo.js";
 import { householdOverview } from "./overview.js";
 import { householdYear } from "./yearBudget.js";
+import { backupErrorMessage, importJsonBackup, importSqliteBackup } from "./backup.js";
 import * as repo from "./repo.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,7 @@ const db = openDatabase(DB_PATH);
 const app = express();
 
 app.use(cors({ origin: CORS_ORIGIN }));
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "40mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, dbPath: DB_PATH });
@@ -396,6 +397,29 @@ app.get("/api/backup/sqlite", (_req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   fs.createReadStream(DB_PATH).pipe(res);
 });
+
+app.post("/api/backup/import/json", (req, res) => {
+  try {
+    res.json(importJsonBackup(db, req.body));
+  } catch (err) {
+    res.status(400).json({ error: backupErrorMessage(err) });
+  }
+});
+
+app.post(
+  "/api/backup/import/sqlite",
+  express.raw({ type: "*/*", limit: "80mb" }),
+  (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ error: "Choose a SQLite backup." });
+      }
+      res.json(importSqliteBackup(db, req.body));
+    } catch (err) {
+      res.status(400).json({ error: backupErrorMessage(err) });
+    }
+  },
+);
 
 app.use(
   (

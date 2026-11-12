@@ -199,6 +199,12 @@ CREATE TABLE IF NOT EXISTS savings_plan_intervals (
 export function openDatabase(dbPath: string): Db {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
+  refreshDatabase(db);
+  return db;
+}
+
+/** Apply the current schema and one-time fixes to an open database. */
+export function refreshDatabase(db: Db): void {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
@@ -206,7 +212,6 @@ export function openDatabase(dbPath: string): Db {
   ensureHousehold(db);
   normalizeExpenseAmounts(db);
   migrateSavingsAmountsToFrequency(db);
-  return db;
 }
 
 /**

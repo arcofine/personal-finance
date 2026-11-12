@@ -498,9 +498,68 @@ export function exportJson(db: Db) {
   const categories = listCategories(db);
   const transactions = listTransactions(db);
   const budget = exportFixedExpenses(db);
+  const householdId = getHouseholdId(db);
+  const savingsPlans = db
+    .prepare(
+      `SELECT * FROM savings_plans WHERE household_id = ? AND deleted_at IS NULL ORDER BY name`,
+    )
+    .all(householdId) as {
+    id: string;
+    household_id: string;
+    name: string;
+    amount: number;
+    frequency: string;
+    weekday: string | null;
+    from_account_id: string;
+    to_account_id: string;
+    starts_on: string;
+    ends_on: string | null;
+    carry_in: number;
+    created_at: string;
+    updated_at: string;
+    deleted_at: string | null;
+  }[];
+  const savingsPlanMonths = db
+    .prepare(
+      `
+      SELECT m.*
+      FROM savings_plan_months m
+      JOIN savings_plans p ON p.id = m.savings_plan_id
+      WHERE p.household_id = ? AND p.deleted_at IS NULL
+      ORDER BY m.year_month
+    `,
+    )
+    .all(householdId) as {
+    id: string;
+    savings_plan_id: string;
+    year_month: string;
+    planned_amount: number;
+    omitted: number;
+    created_at: string;
+    updated_at: string;
+  }[];
+  const savingsPlanIntervals = db
+    .prepare(
+      `
+      SELECT m.*
+      FROM savings_plan_intervals m
+      JOIN savings_plans p ON p.id = m.savings_plan_id
+      WHERE p.household_id = ? AND p.deleted_at IS NULL
+      ORDER BY m.from_date, m.to_date
+    `,
+    )
+    .all(householdId) as {
+    id: string;
+    savings_plan_id: string;
+    from_date: string;
+    to_date: string;
+    amount: number;
+    created_at: string;
+    updated_at: string;
+  }[];
   return {
     exportedAt: nowIso(),
-    version: 2,
+    version: 3,
     currencyDefault: "CAD",
     household,
     accounts,
@@ -509,6 +568,40 @@ export function exportJson(db: Db) {
     fixedExpenses: budget.fixedExpenses,
     fixedExpenseMonths: budget.fixedExpenseMonths,
     salaries: budget.salaries,
+    savingsPlans: savingsPlans.map((row) => ({
+      id: row.id,
+      householdId: row.household_id,
+      name: row.name,
+      amount: row.amount,
+      frequency: row.frequency,
+      weekday: row.weekday,
+      fromAccountId: row.from_account_id,
+      toAccountId: row.to_account_id,
+      startsOn: row.starts_on,
+      endsOn: row.ends_on,
+      carryIn: row.carry_in,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      deletedAt: row.deleted_at,
+    })),
+    savingsPlanMonths: savingsPlanMonths.map((row) => ({
+      id: row.id,
+      savingsPlanId: row.savings_plan_id,
+      yearMonth: row.year_month,
+      plannedAmount: row.planned_amount,
+      omitted: row.omitted === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+    savingsPlanIntervals: savingsPlanIntervals.map((row) => ({
+      id: row.id,
+      savingsPlanId: row.savings_plan_id,
+      from: row.from_date,
+      to: row.to_date,
+      amount: row.amount,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
   };
 }
 

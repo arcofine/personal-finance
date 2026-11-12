@@ -42,6 +42,14 @@ export interface WeekFundSavingsPlan {
   intervals?: PlannedInterval[];
 }
 
+/** One register movement, or one bill still to pay, inside a week card. */
+export interface WeekFundItem {
+  date: string;
+  /** Payee on the register, or the bill name when it is still due. */
+  name: string;
+  amount: number;
+}
+
 export interface WeekFund {
   from: string;
   to: string;
@@ -62,6 +70,12 @@ export interface WeekFund {
   /** How far below zero the balance falls during the week. */
   shortfall: number;
   covered: boolean;
+  /** Deposits that make up `recordedIn`. */
+  inflows: WeekFundItem[];
+  /** Withdrawals that make up `recordedOut`. */
+  outflows: WeekFundItem[];
+  /** Unpaid bills that make up `billsDue`. */
+  bills: WeekFundItem[];
 }
 
 interface Due {
@@ -69,6 +83,7 @@ interface Due {
   kind: "income" | "expense" | "savings";
   amount: number;
   accountId: string | null;
+  name: string;
 }
 
 /**
@@ -107,14 +122,28 @@ export function buildWeekFunds(input: {
     let incomeDue = 0;
     let billsDue = 0;
     let savingsDue = 0;
+    const inflows: WeekFundItem[] = [];
+    const outflows: WeekFundItem[] = [];
+    const bills: WeekFundItem[] = [];
     let cursor = week.from;
     while (cursor <= week.to) {
       const todaysMovements = input.movements
         .filter((movement) => movement.date === cursor && isSpendable(accountType.get(movement.accountId)))
         .sort((a, b) => Number(a.amount < 0) - Number(b.amount < 0));
       for (const movement of todaysMovements) {
-        if (movement.amount > 0) recordedIn = round2(recordedIn + movement.amount);
-        else recordedOut = round2(recordedOut - movement.amount);
+        if (movement.amount > 0) {
+          recordedIn = round2(recordedIn + movement.amount);
+          inflows.push({ date: movement.date, name: movementName(movement), amount: movement.amount });
+        } else {
+          recordedOut = round2(recordedOut - movement.amount);
+          if (movement.amount < 0) {
+            outflows.push({
+              date: movement.date,
+              name: movementName(movement),
+              amount: round2(-movement.amount),
+            });
+          }
+        }
         balance = round2(balance + movement.amount);
         if (balance < low) low = balance;
       }
@@ -124,8 +153,10 @@ export function buildWeekFunds(input: {
           if (due.kind !== kind) continue;
           if (due.kind !== "savings" && !countsAgainstSpendable(due.accountId, accountType)) continue;
           if (due.kind === "income") incomeDue = round2(incomeDue + due.amount);
-          else if (due.kind === "expense") billsDue = round2(billsDue + due.amount);
-          else savingsDue = round2(savingsDue + due.amount);
+          else if (due.kind === "expense") {
+            billsDue = round2(billsDue + due.amount);
+            bills.push({ date: due.date, name: due.name, amount: due.amount });
+          } else savingsDue = round2(savingsDue + due.amount);
           balance = round2(balance + (due.kind === "income" ? due.amount : -due.amount));
           if (balance < low) low = balance;
         }
@@ -145,6 +176,9 @@ export function buildWeekFunds(input: {
       closing: balance,
       shortfall,
       covered: shortfall === 0,
+      inflows,
+      outflows,
+      bills,
     });
   }
 
@@ -199,7 +233,13 @@ function plansStillDue(plans: WeekFundPlan[], movements: WeekFundMovement[]): Du
       const still = round2(dated.amount - Math.max(0, recordedLeft));
       recordedLeft = 0;
       if (still > 0.001) {
-        dues.push({ date: dated.date, kind: plan.kind, amount: still, accountId: plan.accountId });
+        dues.push({
+          date: dated.date,
+          kind: plan.kind,
+          amount: still,
+          accountId: plan.accountId,
+          name: plan.name,
+        });
       }
     }
   }
@@ -267,7 +307,9 @@ function savingsStillDue(
         for (const item of inWeek) {
           const still = round2(Math.max(0, item.amount - pool));
           pool = round2(pool - item.amount);
-          if (still > 0.001) dues.push({ date: item.date, kind: "savings", amount: still, accountId: null });
+          if (still > 0.001) {
+            dues.push({ date: item.date, kind: "savings", amount: still, accountId: null, name: "Savings" });
+          }
         }
       }
     }
@@ -317,6 +359,13 @@ function countsAgainstSpendable(accountId: string | null, accountType: Map<strin
 
 function isSpendable(type: AccountType | undefined): boolean {
   return type === "checking" || type === "cash";
+}
+
+function movementName(movement: WeekFundMovement): string {
+  const payee = movement.payee?.trim();
+  if (payee) return payee;
+  if (movement.transferGroupId) return "Transfer";
+  return "—";
 }
 
 function payeeMatches(payee: string | null, name: string): boolean {

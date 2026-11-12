@@ -1,5 +1,12 @@
-import type { WeekFund } from "@pf/core";
+import { useEffect, useState } from "react";
+import type { WeekFund, WeekFundItem } from "@pf/core";
 import { formatCad } from "../api";
+
+type OpenList = {
+  title: string;
+  items: WeekFundItem[];
+  total: number;
+};
 
 export function WeekFunds({
   weeks,
@@ -12,6 +19,7 @@ export function WeekFunds({
 }) {
   const Title = heading;
   const short = weeks.filter((week) => !week.covered).length;
+  const [open, setOpen] = useState<OpenList | null>(null);
   return (
     <section className="week-funds">
       <Title className={heading === "h2" ? undefined : "section-label"}>Funds for each week</Title>
@@ -32,21 +40,61 @@ export function WeekFunds({
             {weeks.map((week) => {
               const tone = weekTone(week);
               const current = today >= week.from && today <= week.to;
+              const range = weekLabel(week.from, week.to);
               return (
                 <article
                   key={week.from}
                   className={`week-fund ${tone}${current ? " current" : ""}`}
                 >
                   <header>
-                    <span>{weekLabel(week.from, week.to)}</span>
+                    <span>{range}</span>
                     {current && <span className="week-fund-now">This week</span>}
                   </header>
                   <strong className={`week-status ${tone}`}>{statusLabel(week)}</strong>
                   <p>Start {formatCad(week.opening)}</p>
-                  {week.recordedIn > 0 && <p>Already in {formatCad(week.recordedIn)}</p>}
-                  {week.recordedOut > 0 && <p>Already out {formatCad(week.recordedOut)}</p>}
+                  {week.recordedIn > 0 && (
+                    <FundLine
+                      label="Already in"
+                      amount={week.recordedIn}
+                      range={range}
+                      onOpen={() =>
+                        setOpen({
+                          title: `Already in · ${range}`,
+                          items: week.inflows,
+                          total: week.recordedIn,
+                        })
+                      }
+                    />
+                  )}
+                  {week.recordedOut > 0 && (
+                    <FundLine
+                      label="Already out"
+                      amount={week.recordedOut}
+                      range={range}
+                      onOpen={() =>
+                        setOpen({
+                          title: `Already out · ${range}`,
+                          items: week.outflows,
+                          total: week.recordedOut,
+                        })
+                      }
+                    />
+                  )}
                   {week.incomeDue > 0 && <p>Pay still coming {formatCad(week.incomeDue)}</p>}
-                  {week.billsDue > 0 && <p>Bills still due {formatCad(week.billsDue)}</p>}
+                  {week.billsDue > 0 && (
+                    <FundLine
+                      label="Bills still due"
+                      amount={week.billsDue}
+                      range={range}
+                      onOpen={() =>
+                        setOpen({
+                          title: `Bills still due · ${range}`,
+                          items: week.bills,
+                          total: week.billsDue,
+                        })
+                      }
+                    />
+                  )}
                   {week.savingsDue > 0 && <p>Still to set aside {formatCad(week.savingsDue)}</p>}
                   <p>Left {formatCad(week.closing)}</p>
                 </article>
@@ -55,7 +103,78 @@ export function WeekFunds({
           </div>
         </>
       )}
+      {open && <FundListDialog list={open} onClose={() => setOpen(null)} />}
     </section>
+  );
+}
+
+function FundLine({
+  label,
+  amount,
+  range,
+  onOpen,
+}: {
+  label: string;
+  amount: number;
+  range: string;
+  onOpen: () => void;
+}) {
+  return (
+    <p className="week-fund-line">
+      <span>
+        {label} {formatCad(amount)}
+      </span>
+      <button
+        type="button"
+        className="week-fund-plus"
+        aria-label={`Show ${label.toLowerCase()} for ${range}`}
+        onClick={onOpen}
+      >
+        +
+      </button>
+    </p>
+  );
+}
+
+function FundListDialog({ list, onClose }: { list: OpenList; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="modal" role="dialog" aria-modal="true" aria-label={list.title}>
+        <div className="modal-head">
+          <h2>{list.title}</h2>
+          <button type="button" className="secondary tiny" aria-label="Close" onClick={onClose} autoFocus>
+            ✕
+          </button>
+        </div>
+        {list.items.length === 0 ? (
+          <p className="empty">Nothing in this list.</p>
+        ) : (
+          <ul className="week-fund-items">
+            {list.items.map((item, index) => (
+              <li key={`${item.date}-${item.name}-${item.amount}-${index}`}>
+                <span>{formatItemDate(item.date)}</span>
+                <span>{item.name}</span>
+                <span className="num">{formatCad(item.amount)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="week-fund-items-total">Total {formatCad(list.total)}</p>
+      </div>
+    </div>
   );
 }
 
@@ -72,6 +191,18 @@ function statusLabel(week: WeekFund): string {
   if (tone === "tight" && week.incomeDue > 0) return `Short ${amount} before payday`;
   if (tone === "tight") return `Short ${amount}, then covered`;
   return `Short ${amount}`;
+}
+
+function formatItemDate(iso: string): string {
+  const [yearText, monthText, dayText] = iso.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (!year || !month || !day) return iso;
+  return new Date(year, month - 1, day).toLocaleDateString("en-CA", {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function weekLabel(from: string, to: string): string {
