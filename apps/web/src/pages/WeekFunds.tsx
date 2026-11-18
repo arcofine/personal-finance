@@ -25,7 +25,8 @@ export function WeekFunds({
       <Title className={heading === "h2" ? undefined : "section-label"}>Funds for each week</Title>
       <p className="summary-lead">
         Chequing and cash only. A week is covered when that money can pay the bills still due, and
-        the savings still to move. Savings and CELI are not money to spend.
+        the savings still to move. Savings and CELI are not money to spend. A scheduled row on the
+        register counts as still coming until it is marked paid.
       </p>
       {weeks.length === 0 ? (
         <p className="empty">No weeks to show.</p>
@@ -166,7 +167,10 @@ function FundListDialog({ list, onClose }: { list: OpenList; onClose: () => void
             {list.items.map((item, index) => (
               <li key={`${item.date}-${item.name}-${item.amount}-${index}`}>
                 <span>{formatItemDate(item.date)}</span>
-                <span>{item.name}</span>
+                <span>
+                  {item.name}
+                  {item.scheduled && <span className="muted"> · Scheduled</span>}
+                </span>
                 <span className="num">{formatCad(item.amount)}</span>
               </li>
             ))}

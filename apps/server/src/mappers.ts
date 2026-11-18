@@ -45,6 +45,7 @@ export interface TransactionRow {
   category_id: string | null;
   transfer_group_id: string | null;
   import_hash: string | null;
+  paid_at: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -99,6 +100,7 @@ export function mapTransaction(row: TransactionRow): Transaction {
     categoryId: row.category_id,
     transferGroupId: row.transfer_group_id,
     importHash: row.import_hash,
+    paidAt: row.paid_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,

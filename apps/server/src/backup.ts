@@ -187,10 +187,10 @@ function insertJson(db: Db, backup: JsonBackup): void {
     `
     INSERT INTO transactions
       (id, household_id, account_id, date, amount, payee, memo, category_id, transfer_group_id,
-       import_hash, created_at, updated_at, deleted_at)
+       import_hash, paid_at, created_at, updated_at, deleted_at)
     VALUES
       (@id, @householdId, @accountId, @date, @amount, @payee, @memo, @categoryId, @transferGroupId,
-       @importHash, @createdAt, @updatedAt, @deletedAt)
+       @importHash, @paidAt, @createdAt, @updatedAt, @deletedAt)
   `,
   );
   for (const row of backup.transactions) {
@@ -205,6 +205,7 @@ function insertJson(db: Db, backup: JsonBackup): void {
       categoryId: optionalString(row, "categoryId"),
       transferGroupId: optionalString(row, "transferGroupId"),
       importHash: optionalString(row, "importHash"),
+      paidAt: paidAtFromBackup(row, optionalString(row, "createdAt") ?? stamp),
       createdAt: optionalString(row, "createdAt") ?? stamp,
       updatedAt: optionalString(row, "updatedAt") ?? stamp,
       deletedAt: optionalString(row, "deletedAt"),
@@ -394,6 +395,9 @@ function copyTable(db: Db, table: (typeof TABLES)[number]): void {
   if (shared.length === 0) return;
   const columns = shared.join(", ");
   db.prepare(`INSERT INTO main.${table} (${columns}) SELECT ${columns} FROM src.${table}`).run();
+  if (table === "transactions" && !source.includes("paid_at")) {
+    db.prepare(`UPDATE main.transactions SET paid_at = created_at WHERE paid_at IS NULL`).run();
+  }
 }
 
 function assertReadableBackup(filePath: string): void {
@@ -488,6 +492,12 @@ function requiredString(row: Record<string, unknown>, key: string, label: string
   const value = row[key];
   if (typeof value !== "string" || value.trim() === "") throw new Error(`A ${label} is missing its ${key}.`);
   return value;
+}
+
+/** Older backups had no paid flag. Those rows already counted toward the balance. */
+function paidAtFromBackup(row: Record<string, unknown>, createdAt: string): string | null {
+  if (!Object.prototype.hasOwnProperty.call(row, "paidAt")) return createdAt;
+  return optionalString(row, "paidAt");
 }
 
 function optionalString(row: Record<string, unknown>, key: string, alternate?: string): string | null {

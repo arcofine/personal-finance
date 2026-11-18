@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   category_id TEXT REFERENCES categories(id),
   transfer_group_id TEXT,
   import_hash TEXT,
+  paid_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT
@@ -208,6 +209,7 @@ export function refreshDatabase(db: Db): void {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  ensureTransactionPaid(db);
   ensureBudgetColumns(db);
   ensureHousehold(db);
   normalizeExpenseAmounts(db);
@@ -268,6 +270,7 @@ function backfillMonthlyDueDays(db: Db): void {
     `
     SELECT date FROM transactions
     WHERE deleted_at IS NULL
+      AND paid_at IS NOT NULL
       AND transfer_group_id IS NULL
       AND amount < 0
       AND category_id = ?
@@ -367,6 +370,18 @@ function ensureBudgetColumns(db: Db): void {
   if (salaryColumns.size > 0 && !salaryColumns.has("account_id")) {
     db.exec(`ALTER TABLE salaries ADD COLUMN account_id TEXT REFERENCES accounts(id)`);
   }
+}
+
+/** Rows saved before scheduled transactions existed already counted toward the balance. */
+function ensureTransactionPaid(db: Db): void {
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_info(transactions)`).all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (columns.size === 0 || columns.has("paid_at")) return;
+  db.exec(`ALTER TABLE transactions ADD COLUMN paid_at TEXT`);
+  db.exec(`UPDATE transactions SET paid_at = created_at`);
 }
 
 function ensureHousehold(db: Db): string {

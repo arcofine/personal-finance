@@ -90,11 +90,12 @@ export function amountForBalance(amount: number, kind: CategoryKind | null): num
 
 export function computeBalance(
   openingBalance: number,
-  transactions: Pick<Transaction, "amount" | "deletedAt">[],
+  transactions: Array<Pick<Transaction, "amount" | "deletedAt"> & { paidAt?: string | null }>,
 ): number {
   let sum = openingBalance;
   for (const tx of transactions) {
     if (tx.deletedAt) continue;
+    if (tx.paidAt === null) continue;
     sum += tx.amount;
   }
   return round2(sum);

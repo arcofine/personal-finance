@@ -30,7 +30,7 @@ export function householdYear(db: Db, year: number, asOfDate: string): YearBudge
       SELECT t.account_id, t.date, t.amount, t.transfer_group_id, c.kind
       FROM transactions t
       LEFT JOIN categories c ON c.id = t.category_id AND c.deleted_at IS NULL
-      WHERE t.household_id = ? AND t.deleted_at IS NULL
+      WHERE t.household_id = ? AND t.deleted_at IS NULL AND t.paid_at IS NOT NULL
     `,
     )
     .all(householdId) as {

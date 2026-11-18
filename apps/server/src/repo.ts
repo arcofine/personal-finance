@@ -6,6 +6,7 @@ import {
   mapCsvRows,
   columnMapForPreset,
   parseCsv,
+  calendarToday,
   monthBounds,
   newId,
   nowIso,
@@ -43,7 +44,7 @@ export function listAccounts(db: Db) {
       SELECT a.*,
         ROUND(a.opening_balance + COALESCE((
           SELECT SUM(t.amount) FROM transactions t
-          WHERE t.account_id = a.id AND t.deleted_at IS NULL
+          WHERE t.account_id = a.id AND t.deleted_at IS NULL AND t.paid_at IS NOT NULL
         ), 0), 2) AS balance
       FROM accounts a
       WHERE a.deleted_at IS NULL
@@ -61,7 +62,7 @@ export function getAccount(db: Db, id: string) {
       SELECT a.*,
         ROUND(a.opening_balance + COALESCE((
           SELECT SUM(t.amount) FROM transactions t
-          WHERE t.account_id = a.id AND t.deleted_at IS NULL
+          WHERE t.account_id = a.id AND t.deleted_at IS NULL AND t.paid_at IS NOT NULL
         ), 0), 2) AS balance
       FROM accounts a
       WHERE a.id = ? AND a.deleted_at IS NULL
@@ -258,8 +259,8 @@ export function createTransaction(db: Db, input: CreateTransactionInput) {
     `
     INSERT INTO transactions
       (id, household_id, account_id, date, amount, payee, memo, category_id,
-       transfer_group_id, import_hash, created_at, updated_at, deleted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+       transfer_group_id, import_hash, paid_at, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)
   `,
   ).run(
     id,
@@ -270,6 +271,7 @@ export function createTransaction(db: Db, input: CreateTransactionInput) {
     input.payee ?? null,
     input.memo ?? null,
     input.categoryId ?? null,
+    paidAtFor(input.date, stamp),
     stamp,
     stamp,
   );
@@ -287,6 +289,7 @@ export function updateTransaction(
     .prepare(`SELECT * FROM transactions WHERE id = ? AND deleted_at IS NULL`)
     .get(id) as TransactionRow | undefined;
   if (!existing) return null;
+  if (input.paid === true) return markTransactionPaid(db, existing);
   if (existing.transfer_group_id) {
     throw new Error("Edit transfer legs via delete + recreate transfer for M0");
   }
@@ -295,21 +298,23 @@ export function updateTransaction(
     input.categoryId !== undefined ? input.categoryId : existing.category_id;
   const amount =
     input.amount !== undefined ? input.amount : existing.amount;
+  const date = input.date ?? existing.date;
   const stamp = nowIso();
   db.prepare(
     `
     UPDATE transactions SET
       account_id = ?, date = ?, amount = ?, payee = ?, memo = ?,
-      category_id = ?, updated_at = ?
+      category_id = ?, paid_at = ?, updated_at = ?
     WHERE id = ?
   `,
   ).run(
     input.accountId ?? existing.account_id,
-    input.date ?? existing.date,
+    date,
     amountForBalance(amount, categoryKindOf(db, categoryId)),
     input.payee !== undefined ? input.payee : existing.payee,
     input.memo !== undefined ? input.memo : existing.memo,
     categoryId,
+    paidAtFor(date, stamp, existing.paid_at),
     stamp,
     id,
   );
@@ -364,8 +369,8 @@ export function createTransfer(db: Db, input: CreateTransferInput) {
       `
       INSERT INTO transactions
         (id, household_id, account_id, date, amount, payee, memo, category_id,
-         transfer_group_id, import_hash, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL)
+         transfer_group_id, import_hash, paid_at, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL)
     `,
     ).run(
       fromId,
@@ -376,6 +381,7 @@ export function createTransfer(db: Db, input: CreateTransferInput) {
       payee,
       input.memo ?? null,
       groupId,
+      paidAtFor(input.date, stamp),
       stamp,
       stamp,
     );
@@ -383,8 +389,8 @@ export function createTransfer(db: Db, input: CreateTransferInput) {
       `
       INSERT INTO transactions
         (id, household_id, account_id, date, amount, payee, memo, category_id,
-         transfer_group_id, import_hash, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL)
+         transfer_group_id, import_hash, paid_at, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL)
     `,
     ).run(
       toId,
@@ -395,6 +401,7 @@ export function createTransfer(db: Db, input: CreateTransferInput) {
       payeeIn,
       input.memo ?? null,
       groupId,
+      paidAtFor(input.date, stamp),
       stamp,
       stamp,
     );
@@ -437,8 +444,8 @@ export function importCsv(
   const insert = db.prepare(`
     INSERT INTO transactions
       (id, household_id, account_id, date, amount, payee, memo, category_id,
-       transfer_group_id, import_hash, created_at, updated_at, deleted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)
+       transfer_group_id, import_hash, paid_at, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)
   `);
 
   const exists = db.prepare(`
@@ -463,6 +470,7 @@ export function importCsv(
         row.payee,
         row.memo,
         hash,
+        paidAtFor(row.date, stamp),
         stamp,
         stamp,
       );
@@ -479,7 +487,7 @@ export function reportCategorySpend(
   yearMonth: string,
 ) {
   const { from, to } = monthBounds(yearMonth);
-  const txs = listTransactions(db, { from, to });
+  const txs = listTransactions(db, { from, to }).filter((tx) => tx.paidAt);
   const cats = listCategories(db);
   return {
     yearMonth,
@@ -612,11 +620,41 @@ export function accountBalanceCheck(db: Db, accountId: string) {
   if (!account) return null;
   const txs = db
     .prepare(
-      `SELECT amount, deleted_at FROM transactions WHERE account_id = ?`,
+      `SELECT amount, deleted_at, paid_at FROM transactions WHERE account_id = ?`,
     )
-    .all(accountId) as { amount: number; deleted_at: string | null }[];
+    .all(accountId) as { amount: number; deleted_at: string | null; paid_at: string | null }[];
   return computeBalance(account.opening_balance, txs.map((t) => ({
     amount: t.amount,
     deletedAt: t.deleted_at,
+    paidAt: t.paid_at,
   })));
+}
+
+/** A future date stays off the balance. Today and earlier post immediately. */
+function paidAtFor(date: string, stamp: string, existing: string | null = null): string | null {
+  if (date > calendarToday()) return null;
+  return existing ?? stamp;
+}
+
+/** Post a scheduled row. A future date becomes today so every balance includes it now. */
+function markTransactionPaid(db: Db, existing: TransactionRow): ReturnType<typeof mapTransaction> {
+  if (existing.paid_at) return mapTransaction(existing);
+  const stamp = nowIso();
+  const today = calendarToday();
+  const date = existing.date > today ? today : existing.date;
+  if (existing.transfer_group_id) {
+    db.prepare(
+      `
+      UPDATE transactions SET paid_at = ?, date = ?, updated_at = ?
+      WHERE transfer_group_id = ? AND deleted_at IS NULL
+    `,
+    ).run(stamp, date, stamp, existing.transfer_group_id);
+  } else {
+    db.prepare(
+      `UPDATE transactions SET paid_at = ?, date = ?, updated_at = ? WHERE id = ?`,
+    ).run(stamp, date, stamp, existing.id);
+  }
+  return mapTransaction(
+    db.prepare(`SELECT * FROM transactions WHERE id = ?`).get(existing.id) as TransactionRow,
+  );
 }

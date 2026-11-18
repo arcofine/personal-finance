@@ -76,13 +76,18 @@ export interface Transaction {
   transferGroupId: string | null;
   /** Idempotency key for CSV import (hash of date+amount+payee+account). */
   importHash: string | null;
+  /**
+   * When this row was posted to the balance. Null means it is scheduled:
+   * a future date stays off the balance until it is marked paid.
+   */
+  paidAt: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
 }
 
 export interface AccountWithBalance extends Account {
-  /** openingBalance + sum of non-deleted transaction amounts. */
+  /** openingBalance + sum of transactions that have been marked paid. */
   balance: number;
 }
 
@@ -128,6 +133,8 @@ export interface UpdateTransactionInput {
   payee?: string | null;
   memo?: string | null;
   categoryId?: string | null;
+  /** Post a scheduled row. A future date moves to today so the balance includes it now. */
+  paid?: boolean;
 }
 
 export interface CreateTransferInput {

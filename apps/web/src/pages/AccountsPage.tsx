@@ -93,8 +93,8 @@ export function AccountsPage() {
         )}
 
         <p className="tab-note">
-          Balance is the opening balance plus every transaction. Placement accounts track transfers
-          in, not holdings.
+          Balance is the opening balance plus posted transactions. A future date stays out until it
+          is marked paid. Placement accounts track transfers in, not holdings.
         </p>
       </section>
 

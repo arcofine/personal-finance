@@ -106,6 +106,7 @@ export function BudgetPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<AccountWithBalance[]>([]);
   const [transfers, setTransfers] = useState<Transaction[]>([]);
+  const [scheduledRows, setScheduledRows] = useState<Transaction[]>([]);
   const [transferMonth, setTransferMonth] = useState("");
   const [savingsReport, setSavingsReport] = useState<{
     yearMonth: string;
@@ -135,7 +136,10 @@ export function BudgetPage() {
         setBudget(nextBudget);
         setCategories(nextCategories);
         setAccounts(nextAccounts);
-        setTransfers(nextTransfers);
+        setTransfers(nextTransfers.filter((tx) => tx.paidAt));
+        setScheduledRows(
+          nextTransfers.filter((tx) => !tx.paidAt && !tx.transferGroupId && !tx.deletedAt),
+        );
         setTransferMonth(month);
         setSavingsReport(nextSavings);
         setError(null);
@@ -254,8 +258,16 @@ export function BudgetPage() {
         monthAmounts: row.monthAmounts,
         intervals: row.intervals ?? [],
       })),
+      scheduled: scheduledRows.map((tx) => ({
+        accountId: tx.accountId,
+        date: tx.date,
+        amount: tx.amount,
+        categoryId: tx.categoryId,
+        payee: tx.payee,
+        transferGroupId: null,
+      })),
     });
-  }, [visible, month, accounts, transfers, savingsPlans]);
+  }, [visible, month, accounts, transfers, savingsPlans, scheduledRows]);
   const pots = accounts.filter((account) => isPot(account.type));
   const plannedSavings = round2(savingsPlans.reduce((sum, row) => sum + row.planned, 0));
   const setAside = savingsMoves
@@ -2172,7 +2184,7 @@ function savingsTransfers(transactions: Transaction[], accounts: AccountWithBala
   for (const legs of groups.values()) {
     const from = legs.find((leg) => leg.amount < 0);
     const to = legs.find((leg) => leg.amount > 0);
-    if (!from || !to) continue;
+    if (!from || !to || !from.paidAt || !to.paidAt) continue;
     const fromAccount = byId.get(from.accountId);
     const toAccount = byId.get(to.accountId);
     if (!fromAccount || !toAccount) continue;
@@ -2195,7 +2207,7 @@ function savingsTransfers(transactions: Transaction[], accounts: AccountWithBala
   }
 
   for (const tx of transactions) {
-    if (tx.transferGroupId || tx.deletedAt || tx.amount === 0) continue;
+    if (tx.transferGroupId || tx.deletedAt || !tx.paidAt || tx.amount === 0) continue;
     const account = byId.get(tx.accountId);
     if (!account || !isPot(account.type)) continue;
     const inbound = tx.amount > 0;

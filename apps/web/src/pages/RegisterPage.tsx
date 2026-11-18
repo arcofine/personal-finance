@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
-import type { AccountWithBalance, Category, Transaction } from "@pf/core";
+import { calendarToday, type AccountWithBalance, type Category, type Transaction } from "@pf/core";
 import { api, formatCad } from "../api";
 
 type Tab = "transactions" | "transfers";
@@ -47,6 +47,7 @@ export function RegisterPage() {
   const [modal, setModal] = useState<ModalState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [payingId, setPayingId] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -105,12 +106,28 @@ export function RegisterPage() {
     refresh();
   }
 
+  async function markPaid(tx: Transaction) {
+    setPayingId(tx.id);
+    setError(null);
+    try {
+      await api.updateTransaction(tx.id, { paid: true });
+      refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPayingId(null);
+    }
+  }
+
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Register</h1>
-          <p>Transactions and transfers for one account. Positive amounts increase the balance.</p>
+          <p>
+            Transactions and transfers for one account. Positive amounts increase the balance. A
+            future date stays off the balance until you mark it paid.
+          </p>
         </div>
         {selected && (
           <div className="stat">
@@ -178,6 +195,8 @@ export function RegisterPage() {
                 ? "No transactions yet. Add one, or import a statement."
                 : "No transfers on this account. Move money to savings or a placement account."
             }
+            payingId={payingId}
+            onPaid={(tx) => void markPaid(tx)}
             onEdit={(tx) => setModal({ kind: "transaction", tx })}
             onDelete={(tx) => setModal({ kind: "delete", tx })}
           />
@@ -185,8 +204,8 @@ export function RegisterPage() {
 
         <p className="tab-note">
           {tab === "transactions"
-            ? "An expense category is taken out of the balance, even when the amount is entered as a positive number."
-            : "A transfer shows on both accounts. Deleting it removes both sides."}
+            ? "An expense category is taken out of the balance, even when the amount is entered as a positive number. Scheduled rows are listed here and left out of the total until you mark them paid."
+            : "A transfer shows on both accounts. Deleting it removes both sides. A future transfer stays off both balances until you mark it paid."}
         </p>
       </section>
 
@@ -231,17 +250,23 @@ function TxTable({
   rows,
   categoryName,
   empty,
+  payingId,
+  onPaid,
   onEdit,
   onDelete,
 }: {
   rows: Transaction[];
   categoryName: (id: string | null) => string;
   empty: string;
+  payingId: string | null;
+  onPaid: (tx: Transaction) => void;
   onEdit: (tx: Transaction) => void;
   onDelete: (tx: Transaction) => void;
 }) {
   if (rows.length === 0) return <p className="empty">{empty}</p>;
-  const total = rows.reduce((sum, tx) => sum + tx.amount, 0);
+  const posted = rows.filter((tx) => tx.paidAt);
+  const total = posted.reduce((sum, tx) => sum + tx.amount, 0);
+  const scheduled = rows.length - posted.length;
   return (
     <div className="table-wrap">
       <table className="data-table">
@@ -261,7 +286,10 @@ function TxTable({
             const label = tx.payee || (tx.transferGroupId ? "Transfer" : "—");
             return (
               <tr key={tx.id}>
-                <td>{formatDate(tx.date)}</td>
+                <td>
+                  {formatDate(tx.date)}
+                  {!tx.paidAt && <div className="row-sub">Scheduled</div>}
+                </td>
                 <td>
                   <div className="row-title">{label}</div>
                   {tx.memo && <div className="row-sub">{tx.memo}</div>}
@@ -269,6 +297,17 @@ function TxTable({
                 <td>{tx.transferGroupId ? "Transfer" : categoryName(tx.categoryId)}</td>
                 <td className={`num ${moneyClass(tx.amount)}`}>{formatCad(tx.amount)}</td>
                 <td className="row-actions">
+                  {!tx.paidAt && (
+                    <button
+                      type="button"
+                      className="tiny"
+                      aria-label={`Mark ${label} paid`}
+                      disabled={payingId === tx.id}
+                      onClick={() => onPaid(tx)}
+                    >
+                      {payingId === tx.id ? "Paying…" : "Paid"}
+                    </button>
+                  )}
                   {!tx.transferGroupId && (
                     <button
                       type="button"
@@ -294,7 +333,7 @@ function TxTable({
         </tbody>
         <tfoot>
           <tr>
-            <td colSpan={3}>Total</td>
+            <td colSpan={3}>{scheduled > 0 ? "Posted" : "Total"}</td>
             <td className={`num ${moneyClass(total)}`}>{formatCad(total)}</td>
             <td />
           </tr>
@@ -329,7 +368,7 @@ function TransactionModal({
           memo: tx.memo ?? "",
           categoryId: tx.categoryId ?? "",
         }
-      : { ...EMPTY_TX, accountId, date: today() },
+      : { ...EMPTY_TX, accountId, date: calendarToday() },
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -412,9 +451,11 @@ function TransactionModal({
           <input value={draft.memo} onChange={(e) => set("memo", e.target.value)} />
         </label>
         <p className="muted span-2 modal-hint">
-          {selectedKind === "expense"
-            ? "This amount is taken out of the account. 42.50 and -42.50 both reduce the balance."
-            : "Positive amounts increase the balance. Choose an expense category to take the amount out automatically."}
+          {draft.date > calendarToday()
+            ? "This date is still ahead, so it stays off the balance until you mark it paid. Paid posts it on today's date."
+            : selectedKind === "expense"
+              ? "This amount is taken out of the account. 42.50 and -42.50 both reduce the balance."
+              : "Positive amounts increase the balance. Choose an expense category to take the amount out automatically."}
         </p>
         {error && <p className="error span-2">{error}</p>}
         <ModalActions busy={busy} label={tx ? "Save" : "Add transaction"} onClose={onClose} />
@@ -437,7 +478,7 @@ function TransferModal({
   const [draft, setDraft] = useState<TransferDraft>({
     fromAccountId: accountId,
     toAccountId: "",
-    date: today(),
+    date: calendarToday(),
     amount: "",
     memo: "",
   });
@@ -524,7 +565,9 @@ function TransferModal({
           />
         </label>
         <p className="muted span-2 modal-hint">
-          Money leaves the first account and arrives in the second. The amount is always positive.
+          {draft.date > calendarToday()
+            ? "This date is still ahead, so it stays off both balances until you mark it paid. Paid posts it on today's date."
+            : "Money leaves the first account and arrives in the second. The amount is always positive."}
         </p>
         {error && <p className="error span-2">{error}</p>}
         <ModalActions busy={busy} label="Add transfer" onClose={onClose} />
@@ -671,13 +714,6 @@ function moneyClass(amount: number): string {
   if (amount < 0) return "balance neg";
   if (amount > 0) return "balance pos";
   return "balance";
-}
-
-function today(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
 }
 
 function formatDate(iso: string): string {

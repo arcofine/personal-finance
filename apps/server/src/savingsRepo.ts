@@ -406,6 +406,7 @@ export function loadAccountEntries(db: Db): SavingsAccountEntry[] {
       JOIN accounts a ON a.id = t.account_id
       WHERE t.household_id = ?
         AND t.deleted_at IS NULL
+        AND t.paid_at IS NOT NULL
         AND t.transfer_group_id IS NULL
         AND a.deleted_at IS NULL
         AND a.type IN ('savings', 'placement')
@@ -426,7 +427,7 @@ export function loadTransfers(db: Db): SavingsTransfer[] {
       `
       SELECT transfer_group_id, account_id, date, amount
       FROM transactions
-      WHERE household_id = ? AND deleted_at IS NULL AND transfer_group_id IS NOT NULL
+      WHERE household_id = ? AND deleted_at IS NULL AND paid_at IS NOT NULL AND transfer_group_id IS NOT NULL
     `,
     )
     .all(getHouseholdId(db)) as {

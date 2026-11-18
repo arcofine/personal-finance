@@ -40,7 +40,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
       SELECT t.account_id, t.date, t.amount, t.payee, t.category_id, t.transfer_group_id, c.kind
       FROM transactions t
       LEFT JOIN categories c ON c.id = t.category_id AND c.deleted_at IS NULL
-      WHERE t.household_id = ? AND t.deleted_at IS NULL
+      WHERE t.household_id = ? AND t.deleted_at IS NULL AND t.paid_at IS NOT NULL
     `,
     )
     .all(householdId) as {
@@ -114,6 +114,24 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
     activity,
   });
 
+  const scheduledRows = db
+    .prepare(
+      `
+      SELECT t.account_id, t.date, t.amount, t.payee, t.category_id, t.transfer_group_id
+      FROM transactions t
+      WHERE t.household_id = ? AND t.deleted_at IS NULL
+        AND t.paid_at IS NULL AND t.transfer_group_id IS NULL
+    `,
+    )
+    .all(householdId) as {
+    account_id: string;
+    date: string;
+    amount: number;
+    payee: string | null;
+    category_id: string | null;
+    transfer_group_id: string | null;
+  }[];
+
   const movements: WeekMovement[] = rows.map((row) => ({
     accountId: row.account_id,
     date: row.date,
@@ -144,7 +162,7 @@ export function householdOverview(db: Db, asOfInput: string): OverviewReport {
 
   return {
     ...overview,
-    weeks: coverageWeeks(db, asOf, listed, rows),
+    weeks: coverageWeeks(db, asOf, listed, rows, scheduledRows),
     week: buildWeekForecast({
       today: localToday(),
       accounts: listed.map((account) => ({
@@ -179,6 +197,14 @@ function coverageWeeks(
   asOf: string,
   accounts: { id: string; type: AccountType; openingBalance: number }[],
   rows: {
+    account_id: string;
+    date: string;
+    amount: number;
+    payee: string | null;
+    category_id: string | null;
+    transfer_group_id: string | null;
+  }[],
+  scheduled: {
     account_id: string;
     date: string;
     amount: number;
@@ -237,6 +263,14 @@ function coverageWeeks(
       omittedMonths: plan.omittedMonths,
       monthAmounts: plan.monthAmounts,
       intervals: plan.intervals,
+    })),
+    scheduled: scheduled.map((row) => ({
+      accountId: row.account_id,
+      date: row.date,
+      amount: row.amount,
+      categoryId: row.category_id,
+      payee: row.payee,
+      transferGroupId: row.transfer_group_id,
     })),
   });
 }

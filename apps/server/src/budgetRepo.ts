@@ -380,6 +380,7 @@ function loadActivity(
       FROM transactions
       WHERE household_id = ?
         AND deleted_at IS NULL
+        AND paid_at IS NOT NULL
         AND transfer_group_id IS NULL
         AND category_id IS NOT NULL
         AND date >= ?
@@ -939,6 +940,7 @@ function loadSalaryReceipts(
       FROM transactions
       WHERE household_id = ?
         AND deleted_at IS NULL
+        AND paid_at IS NOT NULL
         AND transfer_group_id IS NULL
         AND category_id IS NOT NULL
         AND date >= ?

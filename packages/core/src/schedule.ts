@@ -59,6 +59,13 @@ export function parseWeekday(value: unknown): Weekday {
   throw new Error("Pick a day of the week");
 }
 
+/** Local calendar date, YYYY-MM-DD. */
+export function calendarToday(now = new Date()): string {
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 export function assertISODate(value: string): string {
   const parts = readISODate(value);
   if (!parts) throw new Error("Date must be YYYY-MM-DD");

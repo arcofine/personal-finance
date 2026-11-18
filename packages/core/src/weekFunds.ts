@@ -48,6 +48,8 @@ export interface WeekFundItem {
   /** Payee on the register, or the bill name when it is still due. */
   name: string;
   amount: number;
+  /** Set when the amount is a register row scheduled for a future date and not yet paid. */
+  scheduled?: boolean;
 }
 
 export interface WeekFund {
@@ -84,6 +86,8 @@ interface Due {
   amount: number;
   accountId: string | null;
   name: string;
+  categoryId: string | null;
+  scheduled: boolean;
 }
 
 /**
@@ -100,6 +104,11 @@ export function buildWeekFunds(input: {
   movements: WeekFundMovement[];
   plans: WeekFundPlan[];
   savings: WeekFundSavingsPlan[];
+  /**
+   * Register rows dated ahead and not yet marked paid. Each one is a known
+   * payment or pay still coming. It replaces the planned amount it matches.
+   */
+  scheduled?: WeekFundMovement[];
 }): WeekFund[] {
   const fromMonth = input.fromMonth;
   const toMonth = input.toMonth < fromMonth ? fromMonth : input.toMonth;
@@ -107,7 +116,7 @@ export function buildWeekFunds(input: {
   const weeks = weeksBetween(fromMonth, toMonth);
   const available = input.movements.filter((movement) => !movement.transferGroupId);
   const dues: Due[] = [
-    ...plansStillDue(input.plans, available),
+    ...scheduledStillDue(plansStillDue(input.plans, available), input.scheduled ?? []),
     ...savingsStillDue(input.savings, input.movements, accountType, fromMonth, toMonth),
   ];
 
@@ -155,7 +164,12 @@ export function buildWeekFunds(input: {
           if (due.kind === "income") incomeDue = round2(incomeDue + due.amount);
           else if (due.kind === "expense") {
             billsDue = round2(billsDue + due.amount);
-            bills.push({ date: due.date, name: due.name, amount: due.amount });
+            bills.push({
+              date: due.date,
+              name: due.name,
+              amount: due.amount,
+              ...(due.scheduled ? { scheduled: true } : {}),
+            });
           } else savingsDue = round2(savingsDue + due.amount);
           balance = round2(balance + (due.kind === "income" ? due.amount : -due.amount));
           if (balance < low) low = balance;
@@ -239,11 +253,61 @@ function plansStillDue(plans: WeekFundPlan[], movements: WeekFundMovement[]): Du
           amount: still,
           accountId: plan.accountId,
           name: plan.name,
+          categoryId: plan.categoryId,
+          scheduled: false,
         });
       }
     }
   }
   return dues;
+}
+
+/**
+ * A scheduled register row is the known version of a planned bill or pay.
+ * It takes the place of the planned amount it matches, so the same payment is
+ * not counted twice. A row that matches no plan is added as its own due.
+ */
+function scheduledStillDue(planned: Due[], rows: WeekFundMovement[]): Due[] {
+  const remaining = [...planned];
+  const scheduled: Due[] = [];
+  for (const row of rows) {
+    if (row.transferGroupId || Math.abs(row.amount) < 0.001) continue;
+    const due: Due = {
+      date: row.date,
+      kind: row.amount > 0 ? "income" : "expense",
+      amount: round2(Math.abs(row.amount)),
+      accountId: row.accountId,
+      name: row.payee?.trim() || "Scheduled",
+      categoryId: row.categoryId,
+      scheduled: true,
+    };
+    scheduled.push(due);
+    const index = matchingPlanIndex(remaining, due);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return [...remaining, ...scheduled];
+}
+
+function matchingPlanIndex(planned: Due[], row: Due): number {
+  const candidates = planned
+    .map((due, index) => ({ due, index }))
+    .filter(
+      ({ due }) =>
+        due.kind === row.kind &&
+        due.date.slice(0, 7) === row.date.slice(0, 7) &&
+        (!due.accountId || !row.accountId || due.accountId === row.accountId),
+    );
+  const byName = candidates.find(({ due }) => payeeMatches(row.name, due.name));
+  if (byName) return byName.index;
+  const byCategory = candidates.find(
+    ({ due }) => Boolean(row.categoryId) && due.categoryId === row.categoryId,
+  );
+  if (byCategory) return byCategory.index;
+  const byDate = candidates.find(
+    ({ due }) =>
+      due.date === row.date && (!due.categoryId || !row.categoryId || due.categoryId === row.categoryId),
+  );
+  return byDate?.index ?? -1;
 }
 
 function matchesPlan(
@@ -308,7 +372,15 @@ function savingsStillDue(
           const still = round2(Math.max(0, item.amount - pool));
           pool = round2(pool - item.amount);
           if (still > 0.001) {
-            dues.push({ date: item.date, kind: "savings", amount: still, accountId: null, name: "Savings" });
+            dues.push({
+              date: item.date,
+              kind: "savings",
+              amount: still,
+              accountId: null,
+              name: "Savings",
+              categoryId: null,
+              scheduled: false,
+            });
           }
         }
       }
